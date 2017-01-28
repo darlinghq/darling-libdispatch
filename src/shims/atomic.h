@@ -35,6 +35,10 @@
 
 #include <stdatomic.h>
 
+#ifndef os_unlikely
+#define os_unlikely(x) (x)
+#endif
+
 #define memory_order_ordered memory_order_seq_cst
 
 #define _os_atomic_basetypeof(p) \

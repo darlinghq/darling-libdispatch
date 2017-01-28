@@ -33,6 +33,9 @@
 #include <objc/objc-exception.h>
 #include <Foundation/NSString.h>
 
+__attribute__((visibility("hidden")))
+void __attribute__((weak)) _NSRangeExceptionRaise() {}
+
 #pragma mark -
 #pragma mark _os_object_t
 

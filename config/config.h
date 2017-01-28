@@ -109,7 +109,7 @@
 #define HAVE_PTHREAD_KEY_INIT_NP 1
 
 /* Define to 1 if you have the <pthread_machdep.h> header file. */
-#define HAVE_PTHREAD_MACHDEP_H 1
+/* #define HAVE_PTHREAD_MACHDEP_H 1 */
 
 /* Define to 1 if you have the `pthread_main_np' function. */
 #define HAVE_PTHREAD_MAIN_NP 1
