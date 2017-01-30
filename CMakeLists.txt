@@ -72,9 +72,10 @@ add_circular(libdispatch_shared FAT
 		system_dyld
 		system_duct
 		unwind
-		objc
 		platform
 		compiler_rt
+	UPWARD
+		objc
 )
 
 set_target_properties(libdispatch_shared PROPERTIES OUTPUT_NAME "dispatch")
