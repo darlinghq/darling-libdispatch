@@ -26,6 +26,7 @@ include_directories(${CMAKE_SOURCE_DIR}/src/kernel/libsyscall/wrappers/libproc)
 include_directories(${CMAKE_SOURCE_DIR}/src/external/objc4/runtime)
 include_directories(${CMAKE_SOURCE_DIR}/src/external/foundation/include)
 include_directories(${CMAKE_SOURCE_DIR}/src/external/corefoundation)
+include_directories(BEFORE ${CMAKE_SOURCE_DIR}/src/external/libcxx/include)
 include_directories(${CMAKE_CURRENT_BINARY_DIR}/src)
 
 mig(src/protocol.defs)
