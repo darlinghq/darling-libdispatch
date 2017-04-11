@@ -78,6 +78,7 @@ add_circular(libdispatch_shared FAT
 	UPWARD
 		objc
 )
+set_property(TARGET libdispatch_shared APPEND_STRING PROPERTY LINK_FLAGS " -Wl,-order_file,${CMAKE_CURRENT_SOURCE_DIR}/xcodeconfig/libdispatch.order -Wl,-alias_list,${CMAKE_CURRENT_SOURCE_DIR}/xcodeconfig/libdispatch.aliases  ")
 
 set_target_properties(libdispatch_shared PROPERTIES OUTPUT_NAME "dispatch")
 
