@@ -13,6 +13,7 @@ add_definitions(-DTARGET_OS_MAC=1 -DPRIVATE -DDISPATCH_USE_DTRACE=0 -DNeXT_RUNTI
 	-DHAVE_PTHREAD_WORKQUEUE_QOS=0
 	-DDISPATCH_USE_MEMORYSTATUS=0
 	-DDISPATCH_USE_VM_PRESSURE=0
+	-DVOUCHER_USE_MACH_VOUCHER=0
 )
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -nostdinc -D__DARWIN_UNIX03 -fPIC -mmacosx-version-min=10.10")
@@ -59,11 +60,11 @@ set(dispatch_SRCS
 	src/voucher.c
 	src/block.cpp
 	src/shims/lock.c
-	src/firehose/firehose_buffer.c
+	#src/firehose/firehose_buffer.c
 	${CMAKE_CURRENT_BINARY_DIR}/src/protocolServer.c
 	${CMAKE_CURRENT_BINARY_DIR}/src/protocolUser.c
-	${CMAKE_CURRENT_BINARY_DIR}/src/firehose/firehoseUser.c
-	${CMAKE_CURRENT_BINARY_DIR}/src/firehose/firehose_replyServer.c
+	#${CMAKE_CURRENT_BINARY_DIR}/src/firehose/firehoseUser.c
+	#${CMAKE_CURRENT_BINARY_DIR}/src/firehose/firehose_replyServer.c
 )
 
 set(DYLIB_INSTALL_NAME "/usr/lib/system/libdispatch.dylib")
