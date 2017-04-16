@@ -6,11 +6,17 @@ endif(COMMAND cmake_policy)
 
 enable_language(C CXX)
 
-add_definitions(-D__APPLE__ -D__MACH__ -Dtypeof=__typeof__)
-add_definitions(-DTARGET_OS_MAC=1 -DPRIVATE -DDISPATCH_USE_DTRACE=0 -DNeXT_RUNTIME=1 -DNS_RETURNS_INNER_POINTER= -D__BLOCKS__=1)
+add_definitions(-D__APPLE__ -D__MACH__ -Dtypeof=__typeof__ -ggdb -O0)
+add_definitions(-DTARGET_OS_MAC=1 -DPRIVATE -DDISPATCH_USE_DTRACE=0 -DNeXT_RUNTIME=1 -DNS_RETURNS_INNER_POINTER= -D__BLOCKS__=1
+	-DDISPATCH_USE_KEVENT_WORKQUEUE=0
+	-DDISPATCH_USE_KEVENT_QOS=0
+	-DHAVE_PTHREAD_WORKQUEUE_QOS=0
+	-DDISPATCH_USE_MEMORYSTATUS=0
+	-DDISPATCH_USE_VM_PRESSURE=0
+)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -nostdinc -D__DARWIN_UNIX03 -fPIC -mmacosx-version-min=10.12")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-exceptions -std=c++11 -fPIC -mmacosx-version-min=10.12 -nostdinc -D_Bool=bool")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -nostdinc -D__DARWIN_UNIX03 -fPIC -mmacosx-version-min=10.10")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-exceptions -std=c++11 -fPIC -mmacosx-version-min=10.10 -nostdinc -D_Bool=bool")
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/private)
