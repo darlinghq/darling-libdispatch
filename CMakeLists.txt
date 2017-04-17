@@ -16,8 +16,8 @@ add_definitions(-DTARGET_OS_MAC=1 -DPRIVATE -DDISPATCH_USE_DTRACE=0 -DNeXT_RUNTI
 	-DVOUCHER_USE_MACH_VOUCHER=0
 )
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -nostdinc -D__DARWIN_UNIX03 -fPIC -mmacosx-version-min=10.10")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-exceptions -std=c++11 -fPIC -mmacosx-version-min=10.10 -nostdinc -D_Bool=bool")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -nostdinc -D__DARWIN_UNIX03 -fPIC -mmacosx-version-min=10.12")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-exceptions -std=c++11 -fPIC -mmacosx-version-min=10.12 -nostdinc -D_Bool=bool")
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/private)
