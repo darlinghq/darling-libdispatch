@@ -88,7 +88,7 @@
 #define HAVE_MACH_ABSOLUTE_TIME 1
 
 /* Define to 1 if you have the `mach_port_construct' function. */
-#define HAVE_MACH_PORT_CONSTRUCT 1
+#define HAVE_MACH_PORT_CONSTRUCT 0
 
 /* Define to 1 if you have the `malloc_create_zone' function. */
 #define HAVE_MALLOC_CREATE_ZONE 1
