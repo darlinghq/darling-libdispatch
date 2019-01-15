@@ -68,6 +68,7 @@ set(dispatch_SRCS
 )
 
 set(DYLIB_INSTALL_NAME "/usr/lib/system/libdispatch.dylib")
+
 add_circular(libdispatch_shared FAT
 	SOURCES
 		${dispatch_SRCS}
@@ -84,8 +85,8 @@ add_circular(libdispatch_shared FAT
 		compiler_rt
 	UPWARD
 		objc
+	LINK_FLAGS "-Wl,-order_file,${CMAKE_CURRENT_SOURCE_DIR}/xcodeconfig/libdispatch.order -Wl,-alias_list,${CMAKE_CURRENT_SOURCE_DIR}/xcodeconfig/libdispatch.aliases"
 )
-set_property(TARGET libdispatch_shared APPEND_STRING PROPERTY LINK_FLAGS " -Wl,-order_file,${CMAKE_CURRENT_SOURCE_DIR}/xcodeconfig/libdispatch.order -Wl,-alias_list,${CMAKE_CURRENT_SOURCE_DIR}/xcodeconfig/libdispatch.aliases  ")
 
 set_target_properties(libdispatch_shared PROPERTIES OUTPUT_NAME "dispatch")
 
