@@ -66,7 +66,7 @@
         int volatile ref_cnt; \
         int volatile xref_cnt
 
-#if OS_OBJECT_HAVE_OBJC_SUPPORT
+#if 1 //OS_OBJECT_HAVE_OBJC_SUPPORT
 #define OS_OBJECT_CLASS_SYMBOL(name) OS_##name##_class
 #if TARGET_OS_MAC && !TARGET_OS_SIMULATOR && defined(__i386__)
 #define OS_OBJECT_HAVE_OBJC1 1
