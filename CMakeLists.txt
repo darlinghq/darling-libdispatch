@@ -6,8 +6,8 @@ endif(COMMAND cmake_policy)
 
 enable_language(C CXX)
 
-add_definitions(-D__APPLE__ -D__MACH__ -Dtypeof=__typeof__ -ggdb -O0)
-add_definitions(-DTARGET_OS_MAC=1 -DPRIVATE -DDISPATCH_USE_DTRACE=0 -DNeXT_RUNTIME=1 -DNS_RETURNS_INNER_POINTER= -D__BLOCKS__=1
+add_definitions(-Dtypeof=__typeof__ -ggdb -O0)
+add_definitions(-DPRIVATE -DDISPATCH_USE_DTRACE=0 -DNeXT_RUNTIME=1 -DNS_RETURNS_INNER_POINTER= -D__BLOCKS__=1
 	-DDISPATCH_USE_KEVENT_WORKQUEUE=0
 	-DDISPATCH_USE_KEVENT_QOS=0
 	-DHAVE_PTHREAD_WORKQUEUE_QOS=0
