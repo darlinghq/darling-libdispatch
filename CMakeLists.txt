@@ -92,7 +92,7 @@ add_circular(libdispatch_shared FAT
 
 set_target_properties(libdispatch_shared PROPERTIES OUTPUT_NAME "dispatch")
 
-add_library(libdispatch_static STATIC $<TARGET_OBJECTS:libdispatch_shared_obj>)
+add_darling_static_library(libdispatch_static SOURCES $<TARGET_OBJECTS:libdispatch_shared_obj>)
 
 install(TARGETS libdispatch_shared DESTINATION libexec/darling/usr/lib/system)
 
