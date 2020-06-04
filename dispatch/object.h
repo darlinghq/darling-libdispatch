@@ -26,6 +26,10 @@
 #include <dispatch/base.h> // for HeaderDoc
 #endif
 
+#if __has_include(<sys/qos.h>)
+#include <sys/qos.h>
+#endif
+
 DISPATCH_ASSUME_NONNULL_BEGIN
 
 /*!
@@ -52,13 +56,16 @@ OS_OBJECT_DECL_CLASS(dispatch_object);
 
 #if OS_OBJECT_SWIFT3
 #define DISPATCH_DECL(name) OS_OBJECT_DECL_SUBCLASS_SWIFT(name, dispatch_object)
+#define DISPATCH_DECL_SUBCLASS(name, base) OS_OBJECT_DECL_SUBCLASS_SWIFT(name, base)
 #else // OS_OBJECT_SWIFT3
 #define DISPATCH_DECL(name) OS_OBJECT_DECL_SUBCLASS(name, dispatch_object)
+#define DISPATCH_DECL_SUBCLASS(name, base) OS_OBJECT_DECL_SUBCLASS(name, base)
 
 DISPATCH_INLINE DISPATCH_ALWAYS_INLINE DISPATCH_NONNULL_ALL DISPATCH_NOTHROW
 void
-_dispatch_object_validate(dispatch_object_t object) {
-	void *isa = *(void* volatile*)(OS_OBJECT_BRIDGE void*)object;
+_dispatch_object_validate(dispatch_object_t object)
+{
+	void *isa = *(void *volatile*)(OS_OBJECT_BRIDGE void*)object;
 	(void)isa;
 }
 #endif // OS_OBJECT_SWIFT3
@@ -79,32 +86,30 @@ private:
 } *dispatch_object_t;
 #define DISPATCH_DECL(name) \
 		typedef struct name##_s : public dispatch_object_s {} *name##_t
-#define DISPATCH_GLOBAL_OBJECT(type, object) (&(object))
+#define DISPATCH_DECL_SUBCLASS(name, base) \
+		typedef struct name##_s : public base##_s {} *name##_t
+#define DISPATCH_GLOBAL_OBJECT(type, object) (static_cast<type>(&(object)))
 #define DISPATCH_RETURNS_RETAINED
 #else /* Plain C */
+#ifndef __DISPATCH_BUILDING_DISPATCH__
 typedef union {
 	struct _os_object_s *_os_obj;
 	struct dispatch_object_s *_do;
-	struct dispatch_continuation_s *_dc;
 	struct dispatch_queue_s *_dq;
 	struct dispatch_queue_attr_s *_dqa;
 	struct dispatch_group_s *_dg;
 	struct dispatch_source_s *_ds;
+	struct dispatch_channel_s *_dch;
 	struct dispatch_mach_s *_dm;
 	struct dispatch_mach_msg_s *_dmsg;
-	struct dispatch_timer_aggregate_s *_dta;
-	struct dispatch_source_attr_s *_dsa;
 	struct dispatch_semaphore_s *_dsema;
 	struct dispatch_data_s *_ddata;
 	struct dispatch_io_s *_dchannel;
-	struct dispatch_operation_s *_doperation;
-	struct dispatch_disk_s *_ddisk;
-} dispatch_object_t __attribute__((__transparent_union__));
-/*! @parseOnly */
+} dispatch_object_t DISPATCH_TRANSPARENT_UNION;
+#endif // !__DISPATCH_BUILDING_DISPATCH__
 #define DISPATCH_DECL(name) typedef struct name##_s *name##_t
-/*! @parseOnly */
-#define DISPATCH_GLOBAL_OBJECT(t, x) (&(x))
-/*! @parseOnly */
+#define DISPATCH_DECL_SUBCLASS(name, base) typedef base##_t name##_t
+#define DISPATCH_GLOBAL_OBJECT(type, object) ((type)&(object))
 #define DISPATCH_RETURNS_RETAINED
 #endif
 
@@ -122,22 +127,13 @@ typedef union {
 #ifndef DISPATCH_DATA_DECL
 #define DISPATCH_DATA_DECL(name) OS_OBJECT_DECL_SWIFT(name)
 #endif // DISPATCH_DATA_DECL
-#elif !TARGET_OS_WIN32
-/*! @parseOnly */
-#define DISPATCH_SOURCE_DECL(name) \
-		DISPATCH_DECL(name);
-/*! @parseOnly */
-#define DISPATCH_DATA_DECL(name) DISPATCH_DECL(name)
-/*! @parseOnly */
-#define DISPATCH_SOURCE_TYPE_DECL(name) \
-		DISPATCH_EXPORT const struct dispatch_source_type_s \
-		_dispatch_source_type_##name
 #else
 #define DISPATCH_SOURCE_DECL(name) \
 		DISPATCH_DECL(name);
-#define DISPATCH_SOURCE_TYPE_DECL(name) \
-		DISPATCH_EXPORT struct dispatch_source_type_s _dispatch_source_type_##name
 #define DISPATCH_DATA_DECL(name) DISPATCH_DECL(name)
+#define DISPATCH_SOURCE_TYPE_DECL(name) \
+		DISPATCH_EXPORT const struct dispatch_source_type_s \
+		_dispatch_source_type_##name
 #endif
 
 #ifdef __BLOCKS__
@@ -188,6 +184,16 @@ typedef void (^dispatch_block_t)(void);
 __BEGIN_DECLS
 
 /*!
+ * @typedef dispatch_qos_class_t
+ * Alias for qos_class_t type.
+ */
+#if __has_include(<sys/qos.h>)
+typedef qos_class_t dispatch_qos_class_t;
+#else
+typedef unsigned int dispatch_qos_class_t;
+#endif
+
+/*!
  * @function dispatch_retain
  *
  * @abstract
@@ -201,7 +207,7 @@ __BEGIN_DECLS
  * The object to retain.
  * The result of passing NULL in this parameter is undefined.
  */
-__OSX_AVAILABLE_STARTING(__MAC_10_6,__IPHONE_4_0)
+API_AVAILABLE(macos(10.6), ios(4.0))
 DISPATCH_EXPORT DISPATCH_NONNULL_ALL DISPATCH_NOTHROW
 DISPATCH_SWIFT_UNAVAILABLE("Can't be used with ARC")
 void
@@ -229,7 +235,7 @@ dispatch_retain(dispatch_object_t object);
  * The object to release.
  * The result of passing NULL in this parameter is undefined.
  */
-__OSX_AVAILABLE_STARTING(__MAC_10_6,__IPHONE_4_0)
+API_AVAILABLE(macos(10.6), ios(4.0))
 DISPATCH_EXPORT DISPATCH_NONNULL_ALL DISPATCH_NOTHROW
 DISPATCH_SWIFT_UNAVAILABLE("Can't be used with ARC")
 void
@@ -253,7 +259,7 @@ dispatch_release(dispatch_object_t object);
  * @result
  * The context of the object; may be NULL.
  */
-__OSX_AVAILABLE_STARTING(__MAC_10_6,__IPHONE_4_0)
+API_AVAILABLE(macos(10.6), ios(4.0))
 DISPATCH_EXPORT DISPATCH_NONNULL_ALL DISPATCH_PURE DISPATCH_WARN_RESULT
 DISPATCH_NOTHROW
 void *_Nullable
@@ -272,7 +278,7 @@ dispatch_get_context(dispatch_object_t object);
  * The new client defined context for the object. This may be NULL.
  *
  */
-__OSX_AVAILABLE_STARTING(__MAC_10_6,__IPHONE_4_0)
+API_AVAILABLE(macos(10.6), ios(4.0))
 DISPATCH_EXPORT DISPATCH_NOTHROW
 void
 dispatch_set_context(dispatch_object_t object, void *_Nullable context);
@@ -298,7 +304,7 @@ dispatch_set_context(dispatch_object_t object, void *_Nullable context);
  * The context parameter passed to the finalizer function is the current
  * context of the dispatch object at the time the finalizer call is made.
  */
-__OSX_AVAILABLE_STARTING(__MAC_10_6,__IPHONE_4_0)
+API_AVAILABLE(macos(10.6), ios(4.0))
 DISPATCH_EXPORT DISPATCH_NOTHROW
 void
 dispatch_set_finalizer_f(dispatch_object_t object,
@@ -326,8 +332,7 @@ dispatch_set_finalizer_f(dispatch_object_t object,
  * The object to be activated.
  * The result of passing NULL in this parameter is undefined.
  */
-__OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0)
-__TVOS_AVAILABLE(10.0) __WATCHOS_AVAILABLE(3.0)
+API_AVAILABLE(macos(10.12), ios(10.0), tvos(10.0), watchos(3.0))
 DISPATCH_EXPORT DISPATCH_NONNULL_ALL DISPATCH_NOTHROW
 void
 dispatch_activate(dispatch_object_t object);
@@ -350,7 +355,7 @@ dispatch_activate(dispatch_object_t object);
  * The object to be suspended.
  * The result of passing NULL in this parameter is undefined.
  */
-__OSX_AVAILABLE_STARTING(__MAC_10_6,__IPHONE_4_0)
+API_AVAILABLE(macos(10.6), ios(4.0))
 DISPATCH_EXPORT DISPATCH_NONNULL_ALL DISPATCH_NOTHROW
 void
 dispatch_suspend(dispatch_object_t object);
@@ -379,10 +384,53 @@ dispatch_suspend(dispatch_object_t object);
  * The object to be resumed.
  * The result of passing NULL in this parameter is undefined.
  */
-__OSX_AVAILABLE_STARTING(__MAC_10_6,__IPHONE_4_0)
+API_AVAILABLE(macos(10.6), ios(4.0))
 DISPATCH_EXPORT DISPATCH_NONNULL_ALL DISPATCH_NOTHROW
 void
 dispatch_resume(dispatch_object_t object);
+
+/*!
+ * @function dispatch_set_qos_class_floor
+ *
+ * @abstract
+ * Sets the QOS class floor on a dispatch queue, source or workloop.
+ *
+ * @discussion
+ * The QOS class of workitems submitted to this object asynchronously will be
+ * elevated to at least the specified QOS class floor. The QOS of the workitem
+ * will be used if higher than the floor even when the workitem has been created
+ * without "ENFORCE" semantics.
+ *
+ * Setting the QOS class floor is equivalent to the QOS effects of configuring
+ * a queue whose target queue has a QoS class set to the same value.
+ *
+ * @param object
+ * A dispatch queue, workloop, or source to configure.
+ * The object must be inactive.
+ *
+ * Passing another object type or an object that has been activated is undefined
+ * and will cause the process to be terminated.
+ *
+ * @param qos_class
+ * A QOS class value:
+ *  - QOS_CLASS_USER_INTERACTIVE
+ *  - QOS_CLASS_USER_INITIATED
+ *  - QOS_CLASS_DEFAULT
+ *  - QOS_CLASS_UTILITY
+ *  - QOS_CLASS_BACKGROUND
+ * Passing any other value is undefined.
+ *
+ * @param relative_priority
+ * A relative priority within the QOS class. This value is a negative
+ * offset from the maximum supported scheduler priority for the given class.
+ * Passing a value greater than zero or less than QOS_MIN_RELATIVE_PRIORITY
+ * is undefined.
+ */
+API_AVAILABLE(macos(10.14), ios(12.0), tvos(12.0), watchos(5.0))
+DISPATCH_EXPORT DISPATCH_NOTHROW
+void
+dispatch_set_qos_class_floor(dispatch_object_t object,
+		dispatch_qos_class_t qos_class, int relative_priority);
 
 #ifdef __BLOCKS__
 /*!
@@ -541,14 +589,14 @@ dispatch_testcancel(void *object);
  * @param message
  * The message to log above and beyond the introspection.
  */
-__OSX_AVAILABLE_BUT_DEPRECATED(__MAC_10_6,__MAC_10_9,__IPHONE_4_0,__IPHONE_6_0)
-DISPATCH_EXPORT DISPATCH_NONNULL2 DISPATCH_NOTHROW
+API_DEPRECATED("unsupported interface", macos(10.6,10.9), ios(4.0,6.0))
+DISPATCH_EXPORT DISPATCH_NONNULL2 DISPATCH_NOTHROW DISPATCH_COLD
 __attribute__((__format__(printf,2,3)))
 void
 dispatch_debug(dispatch_object_t object, const char *message, ...);
 
-__OSX_AVAILABLE_BUT_DEPRECATED(__MAC_10_6,__MAC_10_9,__IPHONE_4_0,__IPHONE_6_0)
-DISPATCH_EXPORT DISPATCH_NONNULL2 DISPATCH_NOTHROW
+API_DEPRECATED("unsupported interface", macos(10.6,10.9), ios(4.0,6.0))
+DISPATCH_EXPORT DISPATCH_NONNULL2 DISPATCH_NOTHROW DISPATCH_COLD
 __attribute__((__format__(printf,2,0)))
 void
 dispatch_debugv(dispatch_object_t object, const char *message, va_list ap);

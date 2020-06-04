@@ -51,7 +51,7 @@
  *
  *   Such objects are created when used as an NSData and -bytes is called and
  *   where the dispatch data object is an unflattened composite object.
- *   The underlying implementation is _dispatch_data_get_flattened_bytes
+ *   The underlying implementation is dispatch_data_get_flattened_bytes_4libxpc.
  *
  * TRIVIAL SUBRANGES (num_records == 1, buf == nil, destructor == nil)
  *
@@ -100,55 +100,25 @@
 #define _dispatch_data_release(x) dispatch_release(x)
 #endif
 
-const dispatch_block_t _dispatch_data_destructor_free = ^{
-	DISPATCH_INTERNAL_CRASH(0, "free destructor called");
-};
-
-const dispatch_block_t _dispatch_data_destructor_none = ^{
-	DISPATCH_INTERNAL_CRASH(0, "none destructor called");
-};
-
-#if !HAVE_MACH
-const dispatch_block_t _dispatch_data_destructor_munmap = ^{
-	DISPATCH_INTERNAL_CRASH(0, "munmap destructor called");
-};
-#else
-// _dispatch_data_destructor_munmap is a linker alias to the following
-const dispatch_block_t _dispatch_data_destructor_vm_deallocate = ^{
-	DISPATCH_INTERNAL_CRASH(0, "vmdeallocate destructor called");
-};
-#endif
-
-const dispatch_block_t _dispatch_data_destructor_inline = ^{
-	DISPATCH_INTERNAL_CRASH(0, "inline destructor called");
-};
-
-struct dispatch_data_s _dispatch_data_empty = {
-#if DISPATCH_DATA_IS_BRIDGED_TO_NSDATA
-	.do_vtable = DISPATCH_DATA_EMPTY_CLASS,
-#else
-	DISPATCH_GLOBAL_OBJECT_HEADER(data),
-	.do_next = DISPATCH_OBJECT_LISTLESS,
-#endif
-};
-
 DISPATCH_ALWAYS_INLINE
 static inline dispatch_data_t
 _dispatch_data_alloc(size_t n, size_t extra)
 {
 	dispatch_data_t data;
 	size_t size;
+	size_t base_size;
 
-	if (os_mul_and_add_overflow(n, sizeof(range_record),
-			sizeof(struct dispatch_data_s) + extra, &size)) {
+	if (os_add_overflow(sizeof(struct dispatch_data_s), extra, &base_size)) {
+		return DISPATCH_OUT_OF_MEMORY;
+	}
+	if (os_mul_and_add_overflow(n, sizeof(range_record), base_size, &size)) {
 		return DISPATCH_OUT_OF_MEMORY;
 	}
 
-	data = _dispatch_alloc(DISPATCH_DATA_CLASS, size);
+	data = _dispatch_object_alloc(DISPATCH_DATA_CLASS, size);
 	data->num_records = n;
 #if !DISPATCH_DATA_IS_BRIDGED_TO_NSDATA
-	data->do_targetq = dispatch_get_global_queue(
-			DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
+	data->do_targetq = _dispatch_get_default_queue(false);
 	data->do_next = DISPATCH_OBJECT_LISTLESS;
 #endif
 	return data;
@@ -167,11 +137,12 @@ _dispatch_data_destroy_buffer(const void* buffer, size_t size,
 		mach_vm_size_t vm_size = size;
 		mach_vm_address_t vm_addr = (uintptr_t)buffer;
 		mach_vm_deallocate(mach_task_self(), vm_addr, vm_size);
+#else
+		(void)size;
 #endif
 	} else {
 		if (!queue) {
-			queue = dispatch_get_global_queue(
-					DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
+			queue = _dispatch_get_default_queue(false);
 		}
 		dispatch_async_f(queue, destructor, _dispatch_call_block_and_release);
 	}
@@ -192,8 +163,8 @@ _dispatch_data_init(dispatch_data_t data, const void *buffer, size_t size,
 }
 
 void
-dispatch_data_init(dispatch_data_t data, const void *buffer, size_t size,
-		dispatch_block_t destructor)
+_dispatch_data_init_with_bytes(dispatch_data_t data, const void *buffer,
+		size_t size, dispatch_block_t destructor)
 {
 	if (!buffer || !size) {
 		if (destructor) {
@@ -227,7 +198,7 @@ dispatch_data_create(const void* buffer, size_t size, dispatch_queue_t queue,
 		// The default destructor was provided, indicating the data should be
 		// copied.
 		data_buf = malloc(size);
-		if (slowpath(!data_buf)) {
+		if (unlikely(!data_buf)) {
 			return DISPATCH_OUT_OF_MEMORY;
 		}
 		buffer = memcpy(data_buf, buffer, size);
@@ -269,7 +240,7 @@ dispatch_data_create_alloc(size_t size, void** buffer_ptr)
 	dispatch_data_t data = dispatch_data_empty;
 	void *buffer = NULL;
 
-	if (slowpath(!size)) {
+	if (unlikely(!size)) {
 		goto out;
 	}
 	data = _dispatch_data_alloc(0, size);
@@ -284,7 +255,7 @@ out:
 }
 
 void
-_dispatch_data_dispose(dispatch_data_t dd)
+_dispatch_data_dispose(dispatch_data_t dd, DISPATCH_UNUSED bool *allow_free)
 {
 	if (_dispatch_data_leaf(dd)) {
 		_dispatch_data_destroy_buffer(dd->buf, dd->size, dd->do_targetq,
@@ -297,6 +268,17 @@ _dispatch_data_dispose(dispatch_data_t dd)
 		free((void *)dd->buf);
 	}
 }
+
+#if DISPATCH_DATA_IS_BRIDGED_TO_NSDATA
+void
+_dispatch_data_set_target_queue(dispatch_data_t dd, dispatch_queue_t tq)
+{
+	if (tq == DISPATCH_TARGET_QUEUE_DEFAULT) {
+		tq = _dispatch_get_default_queue(false);
+	}
+	_dispatch_object_set_target_queue_inline(dd, tq);
+}
+#endif // DISPATCH_DATA_IS_BRIDGED_TO_NSDATA
 
 size_t
 _dispatch_data_debug(dispatch_data_t dd, char* buf, size_t bufsiz)
@@ -420,7 +402,7 @@ dispatch_data_create_subrange(dispatch_data_t dd, size_t offset,
 	}
 
 	// Crashing here indicates memory corruption of passed in data object
-	if (slowpath(i >= dd_num_records)) {
+	if (unlikely(i >= dd_num_records)) {
 		DISPATCH_INTERNAL_CRASH(i,
 				"dispatch_data_create_subrange out of bounds");
 	}
@@ -433,7 +415,7 @@ dispatch_data_create_subrange(dispatch_data_t dd, size_t offset,
 
 	// find the record containing the end of the current range
 	// and optimize the case when you just remove bytes at the origin
-	size_t count, last_length;
+	size_t count, last_length = 0;
 
 	if (to_the_end) {
 		count = dd_num_records - i;
@@ -450,7 +432,7 @@ dispatch_data_create_subrange(dispatch_data_t dd, size_t offset,
 			last_length -= record_length;
 
 			// Crashing here indicates memory corruption of passed in data object
-			if (slowpath(i + count >= dd_num_records)) {
+			if (unlikely(i + count >= dd_num_records)) {
 				DISPATCH_INTERNAL_CRASH(i + count,
 						"dispatch_data_create_subrange out of bounds");
 			}
@@ -517,7 +499,7 @@ dispatch_data_create_map(dispatch_data_t dd, const void **buffer_ptr,
 	}
 
 	buffer = _dispatch_data_flatten(dd);
-	if (fastpath(buffer)) {
+	if (likely(buffer)) {
 		data = dispatch_data_create(buffer, size, NULL,
 				DISPATCH_DATA_DESTRUCTOR_FREE);
 	} else {
@@ -535,12 +517,12 @@ out:
 }
 
 const void *
-_dispatch_data_get_flattened_bytes(dispatch_data_t dd)
+dispatch_data_get_flattened_bytes_4libxpc(dispatch_data_t dd)
 {
 	const void *buffer;
 	size_t offset = 0;
 
-	if (slowpath(!dd->size)) {
+	if (unlikely(!dd->size)) {
 		return NULL;
 	}
 
@@ -550,9 +532,9 @@ _dispatch_data_get_flattened_bytes(dispatch_data_t dd)
 	}
 
 	void *flatbuf = _dispatch_data_flatten(dd);
-	if (fastpath(flatbuf)) {
+	if (likely(flatbuf)) {
 		// we need a release so that readers see the content of the buffer
-		if (slowpath(!os_atomic_cmpxchgv2o(dd, buf, NULL, flatbuf,
+		if (unlikely(!os_atomic_cmpxchgv2o(dd, buf, NULL, flatbuf,
 				&buffer, release))) {
 			free(flatbuf);
 		} else {

@@ -26,16 +26,14 @@
 #define __OS_EXPOSE_INTERNALS_INDIRECT__ 1
 
 #define DISPATCH_PURE_C 1
-#define _safe_cast_to_long(x) \
-		({ _Static_assert(sizeof(typeof(x)) <= sizeof(long), \
-				"__builtin_expect doesn't support types wider than long"); \
-				(long)(x); })
-#define fastpath(x) ((typeof(x))__builtin_expect(_safe_cast_to_long(x), ~0l))
-#define slowpath(x) ((typeof(x))__builtin_expect(_safe_cast_to_long(x), 0l))
 #define os_likely(x) __builtin_expect(!!(x), 1)
 #define os_unlikely(x) __builtin_expect(!!(x), 0)
 #define likely(x)   __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
+
+#ifndef OS_FALLTHROUGH
+#define OS_FALLTHROUGH
+#endif
 
 #define DISPATCH_INTERNAL_CRASH(ac, msg) ({ panic(msg); __builtin_trap(); })
 
@@ -49,10 +47,13 @@
 #define dispatch_hardware_pause() __asm__("")
 #endif
 
-#define _dispatch_wait_until(c) do { \
-		while (!fastpath(c)) { \
+#define _dispatch_wait_until(c) ({ \
+		__typeof__(c) _c; \
+		for (;;) { \
+			if (likely(_c = (c))) break; \
 			dispatch_hardware_pause(); \
-		} } while (0)
+		} \
+		_c; })
 #define dispatch_compiler_barrier()  __asm__ __volatile__("" ::: "memory")
 
 typedef uint32_t dispatch_lock;
@@ -60,7 +61,9 @@ typedef struct dispatch_gate_s {
 	dispatch_lock dgl_lock;
 } dispatch_gate_s, *dispatch_gate_t;
 #define DLOCK_LOCK_DATA_CONTENTION 0
-static void _dispatch_gate_wait(dispatch_gate_t l, uint32_t flags);
+static void _dispatch_firehose_gate_wait(dispatch_gate_t l, uint32_t flags);
+
+#define fcp_quarntined fcp_quarantined
 
 #include <kern/debug.h>
 #include <machine/cpu_number.h>
@@ -71,9 +74,10 @@ static void _dispatch_gate_wait(dispatch_gate_t l, uint32_t flags);
 #include <sys/param.h>
 #include <sys/types.h>
 #include <vm/vm_kern.h>
+#include <internal/atomic.h> // os/internal/atomic.h
 #include <firehose_types_private.h> // <firehose/firehose_types_private.h>
 #include <tracepoint_private.h> // <firehose/tracepoint_private.h>
-#include <internal/atomic.h> // os/internal/atomic.h
+#include <chunk_private.h> // <firehose/chunk_private.h>
 #include "os/firehose_buffer_private.h"
 #include "firehose_buffer_internal.h"
 #include "firehose_inline_internal.h"
@@ -93,14 +97,11 @@ _Static_assert(offsetof(firehose_stream_state_u, fss_gate) ==
 		offsetof(firehose_stream_state_u, fss_allocator),
 		"fss_gate and fss_allocator alias");
 _Static_assert(sizeof(struct firehose_buffer_header_s) ==
-				FIREHOSE_BUFFER_CHUNK_SIZE,
+				FIREHOSE_CHUNK_SIZE,
 		"firehose buffer header must be 4k");
 _Static_assert(offsetof(struct firehose_buffer_header_s, fbh_unused) <=
-				FIREHOSE_BUFFER_CHUNK_SIZE - FIREHOSE_BUFFER_LIBTRACE_HEADER_SIZE,
+				FIREHOSE_CHUNK_SIZE - FIREHOSE_BUFFER_LIBTRACE_HEADER_SIZE,
 		"we must have enough space for the libtrace header");
-_Static_assert(sizeof(struct firehose_buffer_chunk_s) ==
-				FIREHOSE_BUFFER_CHUNK_SIZE,
-		"firehose buffer chunks must be 4k");
 _Static_assert(powerof2(FIREHOSE_BUFFER_CHUNK_COUNT),
 		"CHUNK_COUNT Must be a power of two");
 _Static_assert(FIREHOSE_BUFFER_CHUNK_COUNT <= 64,
@@ -109,20 +110,19 @@ _Static_assert(FIREHOSE_BUFFER_CHUNK_COUNT <= 64,
 _Static_assert(powerof2(FIREHOSE_BUFFER_MADVISE_CHUNK_COUNT),
 		"madvise chunk count must be a power of two");
 #endif
-_Static_assert(howmany(sizeof(struct firehose_tracepoint_s),
-		sizeof(struct firehose_buffer_chunk_s)) < 255,
-		"refcount assumes that you cannot have more than 255 tracepoints");
-// FIXME: we should have an event-count instead here
 _Static_assert(sizeof(struct firehose_buffer_stream_s) == 128,
 		"firehose buffer stream must be small (single cacheline if possible)");
-_Static_assert(offsetof(struct firehose_buffer_chunk_s, fbc_data) % 8 == 0,
-		"Page header is 8 byte aligned");
 _Static_assert(sizeof(struct firehose_tracepoint_s) == 24,
 		"tracepoint header should be exactly 24 bytes");
 #endif
 
 #ifdef KERNEL
 static firehose_buffer_t kernel_firehose_buffer = NULL;
+
+_Static_assert(FIREHOSE_BUFFER_KERNEL_MAX_CHUNK_COUNT == FIREHOSE_BUFFER_CHUNK_COUNT,
+		"FIREHOSE_BUFFER_KERNEL_MAX_CHUNK_COUNT must match FIREHOSE_BUFFER_CHUNK_COUNT");
+_Static_assert(FIREHOSE_BUFFER_KERNEL_DEFAULT_IO_PAGES <= FIREHOSE_BUFFER_KERNEL_DEFAULT_CHUNK_COUNT * 3 / 4,
+		"FIREHOSE_BUFFER_KERNEL_DEFAULT_IO_PAGES cannot exceed 3/4 of FIREHOSE_BUFFER_KERNEL_DEFAULT_CHUNK_COUNT");
 #endif
 
 #pragma mark -
@@ -130,31 +130,37 @@ static firehose_buffer_t kernel_firehose_buffer = NULL;
 #ifndef KERNEL
 
 static mach_port_t
-firehose_client_reconnect(firehose_buffer_t fb, mach_port_t oldsendp)
+firehose_client_reconnect(firehose_buffer_t fb, mach_port_t oldsendp,
+		firehose_buffer_pushport_t pushport)
 {
-	mach_port_t sendp = MACH_PORT_NULL;
+	mach_port_t cursendp = MACH_PORT_NULL;
 	mach_port_t mem_port = MACH_PORT_NULL, extra_info_port = MACH_PORT_NULL;
 	mach_vm_size_t extra_info_size = 0;
 	kern_return_t kr;
+	bool reconnecting = (oldsendp != MACH_PORT_NULL);
 
 	dispatch_assert(fb->fb_header.fbh_logd_port);
 	dispatch_assert(fb->fb_header.fbh_recvp);
 	dispatch_assert(fb->fb_header.fbh_uniquepid != 0);
 
 	_dispatch_unfair_lock_lock(&fb->fb_header.fbh_logd_lock);
-	sendp = fb->fb_header.fbh_sendp;
-	if (sendp != oldsendp || sendp == MACH_PORT_DEAD) {
+	cursendp = fb->fb_header.fbh_sendp[pushport];
+	if (cursendp != oldsendp || cursendp == MACH_PORT_DEAD) {
 		// someone beat us to reconnecting or logd was unloaded, just go away
 		goto unlock;
 	}
 
-	if (oldsendp) {
-		// same trick as _xpc_pipe_dispose: keeping a send right
-		// maintains the name, so that we can destroy the receive right
-		// in case we still have it.
-		(void)firehose_mach_port_recv_dispose(oldsendp, fb);
-		firehose_mach_port_send_release(oldsendp);
-		fb->fb_header.fbh_sendp = MACH_PORT_NULL;
+	if (reconnecting) {
+		for (int i = 0; i < FIREHOSE_BUFFER_NPUSHPORTS; i++) {
+			mach_port_t spi = fb->fb_header.fbh_sendp[i];
+			dispatch_assert(spi);
+			// same trick as _xpc_pipe_dispose: keeping a send right maintains
+			// the name, so that we can destroy the receive right in case we
+			// still have it.
+			(void)firehose_mach_port_recv_dispose(spi, fb);
+			firehose_mach_port_send_release(spi);
+			fb->fb_header.fbh_sendp[i] = MACH_PORT_NULL;
+		}
 	}
 
 	/* Create a memory port for the buffer VM region */
@@ -173,47 +179,55 @@ firehose_client_reconnect(firehose_buffer_t fb, mach_port_t oldsendp)
 		DISPATCH_CLIENT_CRASH(kr, "Unable to make memory port");
 	}
 
-	/* Create a communication port to the logging daemon */
-	uint32_t opts = MPO_CONTEXT_AS_GUARD | MPO_TEMPOWNER | MPO_INSERT_SEND_RIGHT;
-	sendp = firehose_mach_port_allocate(opts, fb);
-
-	if (oldsendp && _voucher_libtrace_hooks->vah_version >= 3) {
-		if (_voucher_libtrace_hooks->vah_get_reconnect_info) {
-			kr = _voucher_libtrace_hooks->vah_get_reconnect_info(&addr, &size);
-			if (likely(kr == KERN_SUCCESS) && addr && size) {
-				extra_info_size = size;
-				kr = mach_make_memory_entry_64(mach_task_self(), &size, addr,
-						flags, &extra_info_port, MACH_PORT_NULL);
-				if (unlikely(kr)) {
-					// the client probably has some form of memory corruption
-					// and/or a port leak
-					DISPATCH_CLIENT_CRASH(kr, "Unable to make memory port");
-				}
-				kr = mach_vm_deallocate(mach_task_self(), addr, size);
-				(void)dispatch_assume_zero(kr);
+	if (reconnecting && _voucher_libtrace_hooks->vah_get_reconnect_info) {
+		kr = _voucher_libtrace_hooks->vah_get_reconnect_info(&addr, &size);
+		if (likely(kr == KERN_SUCCESS) && addr && size) {
+			extra_info_size = size;
+			kr = mach_make_memory_entry_64(mach_task_self(), &size, addr,
+					flags, &extra_info_port, MACH_PORT_NULL);
+			if (unlikely(kr)) {
+				// the client probably has some form of memory corruption
+				// and/or a port leak
+				DISPATCH_CLIENT_CRASH(kr, "Unable to make memory port");
 			}
+			kr = mach_vm_deallocate(mach_task_self(), addr, size);
+			(void)dispatch_assume_zero(kr);
 		}
 	}
 
+	/* Create memory and IO communication ports to the logging daemon */
+	uint32_t opts = MPO_CONTEXT_AS_GUARD | MPO_TEMPOWNER | MPO_INSERT_SEND_RIGHT;
+	mach_port_t sendp[FIREHOSE_BUFFER_NPUSHPORTS];
+	for (int i = 0; i < FIREHOSE_BUFFER_NPUSHPORTS; i++) {
+		sendp[i] = firehose_mach_port_allocate(opts, 1, fb);
+	}
+	cursendp = sendp[pushport];
+
 	/* Call the firehose_register() MIG routine */
 	kr = firehose_send_register(fb->fb_header.fbh_logd_port, mem_port,
-			sizeof(union firehose_buffer_u), sendp, fb->fb_header.fbh_recvp,
+			sizeof(union firehose_buffer_u),
+			sendp[FIREHOSE_BUFFER_PUSHPORT_MEM],
+			sendp[FIREHOSE_BUFFER_PUSHPORT_IO], fb->fb_header.fbh_recvp,
 			extra_info_port, extra_info_size);
 	if (likely(kr == KERN_SUCCESS)) {
-		fb->fb_header.fbh_sendp = sendp;
+		for (int i = 0; i < FIREHOSE_BUFFER_NPUSHPORTS; i++) {
+			fb->fb_header.fbh_sendp[i] = sendp[i];
+		}
 	} else if (unlikely(kr == MACH_SEND_INVALID_DEST)) {
 		// MACH_SEND_INVALID_DEST here means that logd's boostrap port
 		// turned into a dead name, which in turn means that logd has been
 		// unloaded. The only option here, is to give up permanently.
-		//
-		// same trick as _xpc_pipe_dispose: keeping a send right
-		// maintains the name, so that we can destroy the receive right
-		// in case we still have it.
-		(void)firehose_mach_port_recv_dispose(sendp, fb);
-		firehose_mach_port_send_release(sendp);
+		for (int i = 0; i < FIREHOSE_BUFFER_NPUSHPORTS; i++) {
+			// same trick as _xpc_pipe_dispose: keeping a send right maintains
+			// the name, so that we can destroy the receive right in case we
+			// still have it.
+			(void)firehose_mach_port_recv_dispose(sendp[i], fb);
+			firehose_mach_port_send_release(sendp[i]);
+			fb->fb_header.fbh_sendp[i] = MACH_PORT_DEAD;
+		}
+		cursendp = MACH_PORT_DEAD;
 		firehose_mach_port_send_release(mem_port);
 		if (extra_info_port) firehose_mach_port_send_release(extra_info_port);
-		sendp = fb->fb_header.fbh_sendp = MACH_PORT_DEAD;
 	} else {
 		// the client probably has some form of memory corruption
 		// and/or a port leak
@@ -222,7 +236,7 @@ firehose_client_reconnect(firehose_buffer_t fb, mach_port_t oldsendp)
 
 unlock:
 	_dispatch_unfair_lock_unlock(&fb->fb_header.fbh_logd_lock);
-	return sendp;
+	return cursendp;
 }
 
 static void
@@ -261,20 +275,20 @@ firehose_buffer_update_limits_unlocked(firehose_buffer_t fb)
 		}
 	}
 
-	uint16_t ratio = (uint16_t)(PAGE_SIZE / FIREHOSE_BUFFER_CHUNK_SIZE);
+	uint16_t ratio = (uint16_t)(PAGE_SIZE / FIREHOSE_CHUNK_SIZE);
 	if (ratio > 1) {
 		total = roundup(total, ratio);
 	}
 	total = MAX(total, FIREHOSE_BUFFER_CHUNK_PREALLOCATED_COUNT);
 	if (!(fbb_flags & FIREHOSE_BUFFER_BANK_FLAG_LOW_MEMORY)) {
-		total = MAX(total, TARGET_OS_EMBEDDED ? 8 : 12);
+		total = MAX(total, TARGET_OS_IPHONE ? 8 : 12);
 	}
 
-	new.fbs_max_ref  = total;
-	new.fbs_mem_bank = FIREHOSE_BANK_UNAVAIL_BIT - (total - 1);
-	new.fbs_io_bank  = FIREHOSE_BANK_UNAVAIL_BIT -
-			MAX(3 * total / 8, 2 * io_streams);
-	new.fbs_unused   = 0;
+	new = (firehose_bank_state_u) {
+		.fbs_max_ref = (firehose_chunk_ref_t)(total + 1),
+		.fbs_mem_bank = total - 1,
+		.fbs_io_bank  = MAX(3 * total / 8, 2 * io_streams),
+	};
 
 	old = fbb->fbb_limits;
 	fbb->fbb_limits = new;
@@ -299,8 +313,8 @@ firehose_buffer_create(mach_port_t logd_port, uint64_t unique_pid,
 
 	vm_addr = vm_page_size;
 	const size_t madvise_bytes = FIREHOSE_BUFFER_MADVISE_CHUNK_COUNT *
-			FIREHOSE_BUFFER_CHUNK_SIZE;
-	if (slowpath(madvise_bytes % PAGE_SIZE)) {
+			FIREHOSE_CHUNK_SIZE;
+	if (unlikely(madvise_bytes % PAGE_SIZE)) {
 		DISPATCH_INTERNAL_CRASH(madvise_bytes,
 				"Invalid values for MADVISE_CHUNK_COUNT / CHUNK_SIZE");
 	}
@@ -309,7 +323,7 @@ firehose_buffer_create(mach_port_t logd_port, uint64_t unique_pid,
 			VM_FLAGS_ANYWHERE | VM_FLAGS_PURGABLE |
 			VM_MAKE_TAG(VM_MEMORY_GENEALOGY), MEMORY_OBJECT_NULL, 0, FALSE,
 			VM_PROT_DEFAULT, VM_PROT_ALL, VM_INHERIT_NONE);
-	if (slowpath(kr)) {
+	if (unlikely(kr)) {
 		if (kr != KERN_NO_SPACE) dispatch_assume_zero(kr);
 		firehose_mach_port_send_release(logd_port);
 		return NULL;
@@ -320,7 +334,7 @@ firehose_buffer_create(mach_port_t logd_port, uint64_t unique_pid,
 	vm_offset_t vm_addr = 0;
 	vm_size_t size;
 
-	size = FIREHOSE_BUFFER_KERNEL_CHUNK_COUNT * FIREHOSE_BUFFER_CHUNK_SIZE;
+	size = FIREHOSE_BUFFER_KERNEL_CHUNK_COUNT * FIREHOSE_CHUNK_SIZE;
 	__firehose_allocate(&vm_addr, size);
 
 	(void)logd_port; (void)unique_pid;
@@ -332,7 +346,8 @@ firehose_buffer_create(mach_port_t logd_port, uint64_t unique_pid,
 	fbh->fbh_logd_port = logd_port;
 	fbh->fbh_pid = getpid();
 	fbh->fbh_uniquepid = unique_pid;
-	fbh->fbh_recvp = firehose_mach_port_allocate(opts, fb);
+	fbh->fbh_recvp = firehose_mach_port_allocate(opts, MACH_PORT_QLIMIT_BASIC,
+			fb);
 #endif // !KERNEL
 	fbh->fbh_spi_version = OS_FIREHOSE_SPI_VERSION;
 	fbh->fbh_bank.fbb_flags = bank_flags;
@@ -346,13 +361,13 @@ firehose_buffer_create(mach_port_t logd_port, uint64_t unique_pid,
 	}
 	firehose_buffer_update_limits_unlocked(fb);
 #else
-	uint16_t total = FIREHOSE_BUFFER_CHUNK_PREALLOCATED_COUNT + 1;
-	const uint16_t num_kernel_io_pages = 8;
+	uint16_t total = FIREHOSE_BUFFER_CHUNK_PREALLOCATED_COUNT;
+	const uint16_t num_kernel_io_pages = __firehose_num_kernel_io_pages;
 	uint16_t io_pages = num_kernel_io_pages;
 	fbh->fbh_bank.fbb_state = (firehose_bank_state_u){
-		.fbs_max_ref = total,
-		.fbs_io_bank = FIREHOSE_BANK_UNAVAIL_BIT - io_pages,
-		.fbs_mem_bank = FIREHOSE_BANK_UNAVAIL_BIT - (total - io_pages - 1),
+		.fbs_max_ref = (firehose_chunk_ref_t)(total + 1),
+		.fbs_io_bank = io_pages,
+		.fbs_mem_bank = total - io_pages,
 	};
 	fbh->fbh_bank.fbb_limits = fbh->fbh_bank.fbb_state;
 #endif // KERNEL
@@ -377,7 +392,7 @@ firehose_buffer_create(mach_port_t logd_port, uint64_t unique_pid,
 	// install the early boot page as the current one for persist
 	fbh->fbh_stream[firehose_stream_persist].fbs_state.fss_current =
 			FIREHOSE_BUFFER_CHUNK_PREALLOCATED_COUNT;
-	fbh->fbh_bank.fbb_state.fbs_io_bank += 1;
+	fbh->fbh_bank.fbb_state.fbs_io_bank -= 1;
 #endif
 
 	fbh->fbh_ring_tail = (firehose_ring_tail_u){
@@ -387,52 +402,54 @@ firehose_buffer_create(mach_port_t logd_port, uint64_t unique_pid,
 }
 
 #ifndef KERNEL
-static void
-firehose_notify_source_invoke(mach_msg_header_t *hdr)
+static char const * const _firehose_key = "firehose";
+
+static bool
+firehose_drain_notifications_once(firehose_buffer_t fb)
 {
-	const size_t reply_size =
+	mach_msg_options_t opts = MACH_RCV_MSG | MACH_RCV_TIMEOUT |
+			MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_CTX) | MACH_RCV_LARGE |
+			MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0);
+
+	const size_t maxsize =
+			sizeof(union __RequestUnion__firehose_client_firehoseReply_subsystem);
+	const size_t maxreplysize =
 			sizeof(union __ReplyUnion__firehose_client_firehoseReply_subsystem);
+	mach_msg_size_t rcv_size = maxsize + MAX_TRAILER_SIZE;
+	mig_reply_error_t *msg = alloca(rcv_size);
+	kern_return_t kr;
 
-	firehose_mig_server(firehoseReply_server, reply_size, hdr);
-}
+	kr = mach_msg(&msg->Head, opts, 0, rcv_size, fb->fb_header.fbh_recvp, 0, 0);
 
-static void
-firehose_client_register_for_notifications(firehose_buffer_t fb)
-{
-	static const struct dispatch_continuation_s dc = {
-		.dc_func = (void *)firehose_notify_source_invoke,
-	};
-	firehose_buffer_header_t fbh = &fb->fb_header;
-
-	dispatch_once(&fbh->fbh_notifs_pred, ^{
-		dispatch_source_t ds = _dispatch_source_create_mach_msg_direct_recv(
-				fbh->fbh_recvp, &dc);
-		dispatch_set_context(ds, fb);
-		dispatch_activate(ds);
-		fbh->fbh_notifs_source = ds;
-	});
+	if (kr == KERN_SUCCESS) {
+		dispatch_thread_context_s firehose_ctxt = {
+			.dtc_key = _firehose_key,
+			.dtc_fb = fb,
+		};
+		_dispatch_thread_context_push(&firehose_ctxt);
+		firehose_mig_server(firehoseReply_server, maxreplysize, &msg->Head);
+		_dispatch_thread_context_pop(&firehose_ctxt);
+	} else if (kr != MACH_RCV_TIMED_OUT) {
+		DISPATCH_CLIENT_CRASH(kr, "firehose_drain_notifications_once() failed");
+	}
+	return kr == KERN_SUCCESS;
 }
 
 static void
 firehose_client_send_push_async(firehose_buffer_t fb, qos_class_t qos,
 		bool for_io)
 {
-	bool ask_for_notifs = fb->fb_header.fbh_notifs_source != NULL;
-	mach_port_t sendp = fb->fb_header.fbh_sendp;
+	firehose_buffer_pushport_t pushport = for_io;
+	mach_port_t sendp = fb->fb_header.fbh_sendp[pushport];
 	kern_return_t kr = KERN_FAILURE;
 
-	if (!ask_for_notifs && _dispatch_is_multithreaded_inline()) {
-		firehose_client_register_for_notifications(fb);
-		ask_for_notifs = true;
-	}
-
-	if (slowpath(sendp == MACH_PORT_DEAD)) {
+	if (unlikely(sendp == MACH_PORT_DEAD)) {
 		return;
 	}
 
-	if (fastpath(sendp)) {
-		kr = firehose_send_push_async(sendp, qos, for_io, ask_for_notifs);
-		if (likely(kr == KERN_SUCCESS)) {
+	if (likely(sendp)) {
+		kr = firehose_send_push_async(sendp, qos, 0);
+		if (likely(kr == KERN_SUCCESS || kr == MACH_SEND_TIMED_OUT)) {
 			return;
 		}
 		if (kr != MACH_SEND_INVALID_DEST) {
@@ -441,10 +458,10 @@ firehose_client_send_push_async(firehose_buffer_t fb, qos_class_t qos,
 		}
 	}
 
-	sendp = firehose_client_reconnect(fb, sendp);
-	if (fastpath(MACH_PORT_VALID(sendp))) {
-		kr = firehose_send_push_async(sendp, qos, for_io, ask_for_notifs);
-		if (likely(kr == KERN_SUCCESS)) {
+	sendp = firehose_client_reconnect(fb, sendp, pushport);
+	if (likely(MACH_PORT_VALID(sendp))) {
+		kr = firehose_send_push_async(sendp, qos, 0);
+		if (likely(kr == KERN_SUCCESS || kr == MACH_SEND_TIMED_OUT)) {
 			return;
 		}
 		if (kr != MACH_SEND_INVALID_DEST) {
@@ -453,23 +470,52 @@ firehose_client_send_push_async(firehose_buffer_t fb, qos_class_t qos,
 		}
 	}
 }
+
+OS_NOINLINE
+static void
+firehose_client_start_quarantine(firehose_buffer_t fb)
+{
+	if (_voucher_libtrace_hooks->vah_version < 5) return;
+	if (!_voucher_libtrace_hooks->vah_quarantine_starts) return;
+
+	_voucher_libtrace_hooks->vah_quarantine_starts();
+
+	fb->fb_header.fbh_quarantined = true;
+	firehose_buffer_stream_flush(fb, firehose_stream_special);
+	firehose_buffer_stream_flush(fb, firehose_stream_persist);
+	firehose_buffer_stream_flush(fb, firehose_stream_memory);
+}
 #endif // !KERNEL
 
 static void
 firehose_client_merge_updates(firehose_buffer_t fb, bool async_notif,
-		firehose_push_reply_t reply, firehose_bank_state_u *state_out)
+		firehose_push_reply_t reply, bool quarantined,
+		firehose_bank_state_u *state_out)
 {
+	firehose_buffer_header_t fbh = &fb->fb_header;
 	firehose_bank_state_u state;
 	firehose_ring_tail_u otail, ntail;
 	uint64_t old_flushed_pos, bank_updates;
 	uint16_t io_delta = 0;
 	uint16_t mem_delta = 0;
 
-	if (firehose_atomic_maxv2o(&fb->fb_header, fbh_bank.fbb_mem_flushed,
+	if (quarantined) {
+#ifndef KERNEL
+		// this isn't a dispatch_once so that the upcall to libtrace
+		// can actually log itself without blocking on the gate.
+		if (os_atomic_load(&fbh->fbh_quarantined_state, relaxed) ==
+				FBH_QUARANTINE_NONE) {
+			os_atomic_cmpxchg(&fbh->fbh_quarantined_state, FBH_QUARANTINE_NONE,
+					FBH_QUARANTINE_PENDING, relaxed);
+		}
+#endif
+	}
+
+	if (firehose_atomic_maxv2o(fbh, fbh_bank.fbb_mem_flushed,
 			reply.fpr_mem_flushed_pos, &old_flushed_pos, relaxed)) {
 		mem_delta = (uint16_t)(reply.fpr_mem_flushed_pos - old_flushed_pos);
 	}
-	if (firehose_atomic_maxv2o(&fb->fb_header, fbh_bank.fbb_io_flushed,
+	if (firehose_atomic_maxv2o(fbh, fbh_bank.fbb_io_flushed,
 			reply.fpr_io_flushed_pos, &old_flushed_pos, relaxed)) {
 		io_delta = (uint16_t)(reply.fpr_io_flushed_pos - old_flushed_pos);
 	}
@@ -481,50 +527,133 @@ firehose_client_merge_updates(firehose_buffer_t fb, bool async_notif,
 
 	if (!mem_delta && !io_delta) {
 		if (state_out) {
-			state_out->fbs_atomic_state = os_atomic_load2o(&fb->fb_header,
+			state_out->fbs_atomic_state = os_atomic_load2o(fbh,
 					fbh_bank.fbb_state.fbs_atomic_state, relaxed);
 		}
 		return;
 	}
 
-	bank_updates = ((uint64_t)mem_delta << FIREHOSE_BANK_SHIFT(0)) |
-			((uint64_t)io_delta << FIREHOSE_BANK_SHIFT(1));
-	state.fbs_atomic_state = os_atomic_sub2o(&fb->fb_header,
-			fbh_bank.fbb_state.fbs_atomic_state, bank_updates, relaxed);
-	if (state_out) *state_out = state;
-
-	os_atomic_rmw_loop2o(&fb->fb_header, fbh_ring_tail.frp_atomic_tail,
+	__firehose_critical_region_enter();
+	os_atomic_rmw_loop2o(fbh, fbh_ring_tail.frp_atomic_tail,
 			otail.frp_atomic_tail, ntail.frp_atomic_tail, relaxed, {
 		ntail = otail;
 		// overflow handles the generation wraps
 		ntail.frp_io_flushed += io_delta;
 		ntail.frp_mem_flushed += mem_delta;
 	});
+
+	bank_updates = ((uint64_t)mem_delta << FIREHOSE_BANK_SHIFT(0)) |
+			((uint64_t)io_delta << FIREHOSE_BANK_SHIFT(1));
+	state.fbs_atomic_state = os_atomic_add2o(fbh,
+			fbh_bank.fbb_state.fbs_atomic_state, bank_updates, release);
+	__firehose_critical_region_leave();
+
+	if (state_out) *state_out = state;
+
 	if (async_notif) {
 		if (io_delta) {
-			os_atomic_inc2o(&fb->fb_header, fbh_bank.fbb_io_notifs, relaxed);
+			os_atomic_inc2o(fbh, fbh_bank.fbb_io_notifs, relaxed);
 		}
 		if (mem_delta) {
-			os_atomic_inc2o(&fb->fb_header, fbh_bank.fbb_mem_notifs, relaxed);
+			os_atomic_inc2o(fbh, fbh_bank.fbb_mem_notifs, relaxed);
 		}
 	}
 }
 
 #ifndef KERNEL
-static void
-firehose_client_send_push(firehose_buffer_t fb, bool for_io,
-		firehose_bank_state_u *state_out)
+void *
+firehose_buffer_get_logging_prefs(firehose_buffer_t fb, size_t *length)
 {
-	mach_port_t sendp = fb->fb_header.fbh_sendp;
-	firehose_push_reply_t push_reply = { };
-	qos_class_t qos = qos_class_self();
+	mach_port_t sendp = fb->fb_header.fbh_logd_port;
+	mach_port_t mem_port = MACH_PORT_NULL;
+	mach_vm_size_t size = 0;
+	mach_vm_address_t addr = 0;
 	kern_return_t kr;
 
-	if (slowpath(sendp == MACH_PORT_DEAD)) {
+	if (unlikely(!MACH_PORT_VALID(sendp))) {
+		*length = 0;
+		return NULL;
+	}
+
+	kr = firehose_send_get_logging_prefs(sendp, &mem_port, &size);
+	if (unlikely(kr != KERN_SUCCESS)) {
+		if (kr != MACH_SEND_INVALID_DEST) {
+			DISPATCH_VERIFY_MIG(kr);
+			dispatch_assume_zero(kr);
+		}
+		*length = 0;
+		return NULL;
+	}
+
+	/* Map the memory handle into the server address space */
+	kr = mach_vm_map(mach_task_self(), &addr, size, 0,
+			VM_FLAGS_ANYWHERE, mem_port, 0, FALSE,
+			VM_PROT_READ, VM_PROT_READ, VM_INHERIT_NONE);
+	DISPATCH_VERIFY_MIG(kr);
+	if (dispatch_assume_zero(kr)) {
+		addr = 0;
+		size = 0;
+	}
+	kr = mach_port_deallocate(mach_task_self(), mem_port);
+	DISPATCH_VERIFY_MIG(kr);
+	dispatch_assume_zero(kr);
+
+	*length = (size_t)size;
+	return (void *)addr;
+}
+
+bool
+firehose_buffer_should_send_strings(firehose_buffer_t fb)
+{
+	mach_port_t sendp = fb->fb_header.fbh_sendp[FIREHOSE_BUFFER_PUSHPORT_MEM];
+	kern_return_t kr;
+	boolean_t result = false;
+
+	if (unlikely(sendp == MACH_PORT_DEAD)) {
+		return false;
+	}
+
+	if (likely(sendp)) {
+		kr = firehose_send_should_send_strings(sendp, &result);
+		if (likely(kr == KERN_SUCCESS)) {
+			return result;
+		}
+		if (kr != MACH_SEND_INVALID_DEST) {
+			DISPATCH_VERIFY_MIG(kr);
+			dispatch_assume_zero(kr);
+		}
+	}
+
+	sendp = firehose_client_reconnect(fb, sendp, FIREHOSE_BUFFER_PUSHPORT_MEM);
+	if (likely(MACH_PORT_VALID(sendp))) {
+		kr = firehose_send_should_send_strings(sendp, &result);
+		if (likely(kr == KERN_SUCCESS)) {
+			return result;
+		}
+		if (kr != MACH_SEND_INVALID_DEST) {
+			DISPATCH_VERIFY_MIG(kr);
+			dispatch_assume_zero(kr);
+		}
+	}
+	return false;
+}
+
+OS_NOT_TAIL_CALLED OS_NOINLINE
+static void
+firehose_client_send_push_and_wait(firehose_buffer_t fb, bool for_io,
+		firehose_bank_state_u *state_out)
+{
+	firehose_buffer_pushport_t pushport = for_io;
+	mach_port_t sendp = fb->fb_header.fbh_sendp[pushport];
+	firehose_push_reply_t push_reply = { };
+	boolean_t quarantined = false;
+	kern_return_t kr;
+
+	if (unlikely(sendp == MACH_PORT_DEAD)) {
 		return;
 	}
-	if (fastpath(sendp)) {
-		kr = firehose_send_push(sendp, qos, for_io, &push_reply);
+	if (likely(sendp)) {
+		kr = firehose_send_push_and_wait(sendp, &push_reply, &quarantined);
 		if (likely(kr == KERN_SUCCESS)) {
 			goto success;
 		}
@@ -534,9 +663,9 @@ firehose_client_send_push(firehose_buffer_t fb, bool for_io,
 		}
 	}
 
-	sendp = firehose_client_reconnect(fb, sendp);
-	if (fastpath(MACH_PORT_VALID(sendp))) {
-		kr = firehose_send_push(sendp, qos, for_io, &push_reply);
+	sendp = firehose_client_reconnect(fb, sendp, pushport);
+	if (likely(MACH_PORT_VALID(sendp))) {
+		kr = firehose_send_push_and_wait(sendp, &push_reply, &quarantined);
 		if (likely(kr == KERN_SUCCESS)) {
 			goto success;
 		}
@@ -572,12 +701,22 @@ success:
 	// There only is a point for multithreaded clients if:
 	// - enough samples (total_flushes above some limits)
 	// - the ratio is really bad (a push per cycle is definitely a problem)
-	return firehose_client_merge_updates(fb, false, push_reply, state_out);
+	return firehose_client_merge_updates(fb, false, push_reply, quarantined,
+			state_out);
+}
+
+OS_NOT_TAIL_CALLED OS_NOINLINE
+static void
+__FIREHOSE_CLIENT_THROTTLED_DUE_TO_HEAVY_LOGGING__(firehose_buffer_t fb,
+		bool for_io, firehose_bank_state_u *state_out)
+{
+	firehose_client_send_push_and_wait(fb, for_io, state_out);
 }
 
 kern_return_t
 firehose_client_push_reply(mach_port_t req_port OS_UNUSED,
-	kern_return_t rtc, firehose_push_reply_t push_reply OS_UNUSED)
+	kern_return_t rtc, firehose_push_reply_t push_reply OS_UNUSED,
+	boolean_t quarantined OS_UNUSED)
 {
 	DISPATCH_INTERNAL_CRASH(rtc, "firehose_push_reply should never be sent "
 			"to the buffer receive port");
@@ -585,12 +724,12 @@ firehose_client_push_reply(mach_port_t req_port OS_UNUSED,
 
 kern_return_t
 firehose_client_push_notify_async(mach_port_t server_port OS_UNUSED,
-	firehose_push_reply_t push_reply)
+	firehose_push_reply_t push_reply, boolean_t quarantined)
 {
-	// see _dispatch_source_merge_mach_msg_direct
-	dispatch_queue_t dq = _dispatch_queue_get_current();
-	firehose_buffer_t fb = dispatch_get_context(dq);
-	firehose_client_merge_updates(fb, true, push_reply, NULL);
+	dispatch_thread_context_t ctxt =
+			_dispatch_thread_context_find(_firehose_key);
+	firehose_buffer_t fb = ctxt->dtc_fb;
+	firehose_client_merge_updates(fb, true, push_reply, quarantined, NULL);
 	return KERN_SUCCESS;
 }
 
@@ -610,109 +749,253 @@ firehose_buffer_update_limits(firehose_buffer_t fb)
 #endif // !KERNEL
 
 OS_ALWAYS_INLINE
-static inline firehose_tracepoint_t
-firehose_buffer_chunk_init(firehose_buffer_chunk_t fbc,
-		firehose_tracepoint_query_t ask, uint8_t **privptr)
+static inline uint64_t
+firehose_buffer_chunk_apply_stamp_slop(uint64_t stamp)
 {
+	// <rdar://problem/23562733> boot starts mach absolute time at
+	// 0, and wrapping around to values above UINT64_MAX -
+	// FIREHOSE_STAMP_SLOP breaks firehose_buffer_stream_flush()
+	// assumptions
+	return stamp > FIREHOSE_STAMP_SLOP ? stamp - FIREHOSE_STAMP_SLOP : 0;
+}
+
+OS_ALWAYS_INLINE
+static inline bool
+firehose_buffer_chunk_stamp_delta_fits(firehose_chunk_t fc, uint64_t stamp)
+{
+	return !((stamp - fc->fc_timestamp) >> 48);
+}
+
+OS_ALWAYS_INLINE
+static inline firehose_tracepoint_t
+firehose_buffer_chunk_init(firehose_chunk_t fc,
+		firehose_tracepoint_query_t ask, uint8_t **privptr, uint64_t thread,
+		firehose_tracepoint_t *lft, uint64_t loss_start)
+{
+	firehose_tracepoint_t ft;
+	uint64_t stamp_and_len;
+
 	const uint16_t ft_size = offsetof(struct firehose_tracepoint_s, ft_data);
 
-	uint16_t pub_offs = offsetof(struct firehose_buffer_chunk_s, fbc_data);
-	uint16_t priv_offs = FIREHOSE_BUFFER_CHUNK_SIZE;
+	uint16_t pub_offs = offsetof(struct firehose_chunk_s, fc_data);
+	uint16_t priv_offs = FIREHOSE_CHUNK_SIZE;
+
+	if (unlikely(lft)) {
+		const uint16_t flp_size = sizeof(struct firehose_loss_payload_s);
+		uint64_t stamp, minstamp;
+		uint16_t flp_pub_offs;
+
+		// first, try to make both timestamps fit
+		minstamp = MIN(ask->stamp, loss_start);
+		fc->fc_timestamp =
+				firehose_buffer_chunk_apply_stamp_slop(minstamp);
+
+		// if they can't both fit, use the timestamp of the actual tracepoint:
+		//  a) this should _really_ never happen
+		//  b) if it does, a determined reader can tell that it did by comparing
+		//     the loss event start_stamp payload field with the main stamp
+		if (!firehose_buffer_chunk_stamp_delta_fits(fc, ask->stamp)) {
+			// if ask->stamp didn't fit on the first try it must be greater than
+			// loss_start by > 2^48, so it must also be greater than
+			// FIREHOSE_STAMP_SLOP - so no need to worry about underflow here
+			fc->fc_timestamp = ask->stamp - FIREHOSE_STAMP_SLOP;
+		}
+
+		*lft = (firehose_tracepoint_t)fc->fc_data;
+
+		stamp = firehose_buffer_chunk_stamp_delta_fits(fc, loss_start) ?
+				loss_start : ask->stamp;
+
+		stamp_and_len = stamp - fc->fc_timestamp;
+		stamp_and_len |= (uint64_t)flp_size << 48;
+		os_atomic_store2o(*lft, ft_stamp_and_length, stamp_and_len, relaxed);
+
+		(*lft)->ft_thread = thread; // not really meaningful
+
+		flp_pub_offs = roundup(ft_size + flp_size, 8);
+		pub_offs += flp_pub_offs;
+		ft = (firehose_tracepoint_t)(fc->fc_data + flp_pub_offs);
+	} else {
+		fc->fc_timestamp =
+				firehose_buffer_chunk_apply_stamp_slop(ask->stamp);
+		ft = (firehose_tracepoint_t)fc->fc_data;
+	}
 
 	pub_offs += roundup(ft_size + ask->pubsize, 8);
 	priv_offs -= ask->privsize;
 
-	if (fbc->fbc_pos.fbc_atomic_pos) {
-		// Needed for process death handling (recycle-reuse):
-		// No atomic fences required, we merely want to make sure the observers
-		// will see memory effects in program (asm) order.
-		// 1. the payload part of the chunk is cleared completely
-		// 2. the chunk is marked as reused
-		// This ensures that if we don't see a reference to a chunk in the ring
-		// and it is dirty, when crawling the chunk, we don't see remnants of
-		// other tracepoints
-		//
-		// We only do that when the fbc_pos is non zero, because zero means
-		// we just faulted the chunk, and the kernel already bzero-ed it.
-		bzero(fbc->fbc_data, sizeof(fbc->fbc_data));
-	}
-	dispatch_compiler_barrier();
-	// <rdar://problem/23562733> boot starts mach absolute time at 0, and
-	// wrapping around to values above UINT64_MAX - FIREHOSE_STAMP_SLOP
-	// breaks firehose_buffer_stream_flush() assumptions
-	if (ask->stamp > FIREHOSE_STAMP_SLOP) {
-		fbc->fbc_timestamp = ask->stamp - FIREHOSE_STAMP_SLOP;
-	} else {
-		fbc->fbc_timestamp = 0;
-	}
-	fbc->fbc_pos = (firehose_buffer_pos_u){
-		.fbc_next_entry_offs = pub_offs,
-		.fbc_private_offs = priv_offs,
-		.fbc_refcnt = 1,
-		.fbc_qos_bits = firehose_buffer_qos_bits_propagate(),
-		.fbc_stream = ask->stream,
-		.fbc_flag_io = ask->for_io,
+	// Needed for process death handling (tracepoint-begin):
+	// write the length before making the chunk visible
+	stamp_and_len = ask->stamp - fc->fc_timestamp;
+	stamp_and_len |= (uint64_t)ask->pubsize << 48;
+	os_atomic_store2o(ft, ft_stamp_and_length, stamp_and_len, relaxed);
+
+	ft->ft_thread = thread;
+
+	fc->fc_pos = (firehose_chunk_pos_u){
+		.fcp_next_entry_offs = pub_offs,
+		.fcp_private_offs = priv_offs,
+		.fcp_refcnt = 1,
+		.fcp_stream = ask->stream,
+		.fcp_flag_io = ask->for_io,
+		.fcp_quarantined = ask->quarantined,
 	};
 
 	if (privptr) {
-		*privptr = fbc->fbc_start + priv_offs;
+		*privptr = fc->fc_start + priv_offs;
 	}
-	return (firehose_tracepoint_t)fbc->fbc_data;
+	return ft;
 }
 
 OS_NOINLINE
 static firehose_tracepoint_t
 firehose_buffer_stream_chunk_install(firehose_buffer_t fb,
-		firehose_tracepoint_query_t ask, uint8_t **privptr, uint16_t ref)
+		firehose_tracepoint_query_t ask, uint8_t **privptr,
+		firehose_chunk_ref_t ref)
 {
 	firehose_stream_state_u state, new_state;
-	firehose_tracepoint_t ft;
-	firehose_buffer_stream_t fbs = &fb->fb_header.fbh_stream[ask->stream];
-	uint64_t stamp_and_len;
+	firehose_tracepoint_t ft = NULL, lft;
+	firehose_buffer_header_t fbh = &fb->fb_header;
+	firehose_buffer_stream_t fbs = &fbh->fbh_stream[ask->stream];
 
-	if (fastpath(ref)) {
-		firehose_buffer_chunk_t fbc = firehose_buffer_ref_to_chunk(fb, ref);
-		ft = firehose_buffer_chunk_init(fbc, ask, privptr);
-		// Needed for process death handling (tracepoint-begin):
-		// write the length before making the chunk visible
-		stamp_and_len  = ask->stamp - fbc->fbc_timestamp;
-		stamp_and_len |= (uint64_t)ask->pubsize << 48;
-		os_atomic_store2o(ft, ft_stamp_and_length, stamp_and_len, relaxed);
+	if (likely(ref)) {
+		uint64_t thread;
+		bool installed = false;
+		firehose_chunk_t fc = firehose_buffer_ref_to_chunk(fb, ref);
+
+		if (os_atomic_load(&fc->fc_pos.fcp_atomic_pos, relaxed)) {
+			// Needed for process death handling (recycle-reuse):
+			// No atomic fences required, we merely want to make sure the
+			// observers will see memory effects in program (asm) order.
+			// 1. the payload part of the chunk is cleared completely
+			// 2. the chunk is marked as reused
+			// This ensures that if we don't see a reference to a chunk in the
+			// ring and it is dirty, when crawling the chunk, we don't see
+			// remnants of other tracepoints.
+			//
+			// We only do that when the fc_pos is non zero, because zero means
+			// we just faulted the chunk, and the kernel already bzero-ed it.
+			bzero(fc->fc_data, sizeof(fc->fc_data));
+		}
+		dispatch_compiler_barrier();
 
 		if (ask->stream == firehose_stream_metadata) {
-			os_atomic_or2o(fb, fb_header.fbh_bank.fbb_metadata_bitmap,
-					1ULL << ref, relaxed);
+			os_atomic_or2o(fbh, fbh_bank.fbb_metadata_bitmap, 1ULL << ref,
+					relaxed);
 		}
-		// release barrier to make the chunk init visible
-		os_atomic_rmw_loop2o(fbs, fbs_state.fss_atomic_state,
-				state.fss_atomic_state, new_state.fss_atomic_state, release, {
-			// We use a generation counter to prevent a theoretical ABA problem:
-			// a thread could try to acquire a tracepoint in a chunk, fail to
-			// do so mark it as to be pushed, enqueue it, and then be preempted
-			//
-			// It sleeps for a long time, and then tries to acquire the
-			// allocator bit and uninstalling the chunk. Succeeds in doing so,
-			// but because the chunk actually happened to have cycled all the
-			// way back to being installed. That thread would effectively hide
-			// that unflushed chunk and leak it.
-			//
-			// Having a generation counter prevents the uninstallation of the
-			// chunk to spuriously succeed when it was a re-incarnation of it.
-			new_state = (firehose_stream_state_u){
-				.fss_current = ref,
-				.fss_generation = state.fss_generation + 1,
+
+#if KERNEL
+		thread = thread_tid(current_thread());
+#else
+		thread = _pthread_threadid_self_np_direct();
+#endif
+
+		// If no tracepoints were lost at the tail end of this generation, the
+		// chunk timestamp is the stamp of the first tracepoint and the first
+		// tracepoint belongs at the beginning of the chunk.  If, however, we
+		// need to record a loss event, the timestamp has to be the minimum of
+		// the loss stamp and the stamp of the first tracepoint, and the loss
+		// event needs to be placed at the beginning of the chunk in addition to
+		// the first actual tracepoint.
+		state.fss_atomic_state =
+				os_atomic_load2o(fbs, fbs_state.fss_atomic_state, relaxed);
+
+		if (likely(!state.fss_loss)) {
+			ft = firehose_buffer_chunk_init(fc, ask, privptr, thread, NULL, 0);
+
+			// release to publish the chunk init
+			installed = os_atomic_rmw_loop2o(fbs, fbs_state.fss_atomic_state,
+					state.fss_atomic_state, new_state.fss_atomic_state, release, {
+				if (state.fss_loss) {
+					os_atomic_rmw_loop_give_up(break);
+				}
+				// clear the gate, waiter bits and loss count
+				new_state = (firehose_stream_state_u){
+					.fss_current = ref,
+					.fss_generation = state.fss_generation + 1,
+				};
+			});
+		}
+
+		if (unlikely(!installed)) {
+			uint64_t loss_start, loss_end;
+
+			// ensure we can see the start stamp
+			(void)os_atomic_load2o(fbs, fbs_state.fss_atomic_state, acquire);
+			loss_start = fbs->fbs_loss_start;
+			fbs->fbs_loss_start = 0; // reset under fss_gate
+			loss_end = mach_continuous_time();
+
+			ft = firehose_buffer_chunk_init(fc, ask, privptr, thread, &lft,
+					loss_start);
+			os_atomic_rmw_loop2o(fbs, fbs_state.fss_atomic_state,
+					state.fss_atomic_state, new_state.fss_atomic_state, release, {
+				// no giving up this time!
+				new_state = (firehose_stream_state_u){
+					.fss_current = ref,
+					.fss_generation = state.fss_generation + 1,
+				};
+			});
+
+			struct firehose_loss_payload_s flp = {
+				.start_stamp = loss_start,
+				.end_stamp = loss_end,
+				.count = state.fss_loss,
 			};
-		});
+			memcpy(lft->ft_data, &flp, sizeof(flp));
+
+			firehose_tracepoint_id_u ftid = { .ftid = {
+				._namespace = firehose_tracepoint_namespace_loss,
+				// no meaningful value for _type
+				// nor for _flags
+				._code = ask->stream,
+			} };
+
+			// publish the contents of the loss tracepoint
+			os_atomic_store2o(lft, ft_id.ftid_atomic_value, ftid.ftid_value,
+					release);
+		}
 	} else {
-		// the allocator gave up just clear the allocator + waiter bits
-		firehose_stream_state_u mask = { .fss_allocator = ~0u, };
-		state.fss_atomic_state = os_atomic_and_orig2o(fbs,
-				fbs_state.fss_atomic_state, ~mask.fss_atomic_state, relaxed);
-		ft = NULL;
+		// the allocator gave up - just clear the allocator and waiter bits and
+		// increment the loss count
+		state.fss_atomic_state =
+				os_atomic_load2o(fbs, fbs_state.fss_atomic_state, relaxed);
+		if (!state.fss_timestamped) {
+			fbs->fbs_loss_start = mach_continuous_time();
+
+			// release to publish the timestamp
+			os_atomic_rmw_loop2o(fbs, fbs_state.fss_atomic_state,
+					state.fss_atomic_state, new_state.fss_atomic_state,
+					release, {
+				new_state = (firehose_stream_state_u){
+					.fss_loss =
+							MIN(state.fss_loss + 1, FIREHOSE_LOSS_COUNT_MAX),
+					.fss_timestamped = true,
+					.fss_generation = state.fss_generation,
+				};
+			});
+		} else {
+			os_atomic_rmw_loop2o(fbs, fbs_state.fss_atomic_state,
+					state.fss_atomic_state, new_state.fss_atomic_state,
+					relaxed, {
+				new_state = (firehose_stream_state_u){
+					.fss_loss =
+							MIN(state.fss_loss + 1, FIREHOSE_LOSS_COUNT_MAX),
+					.fss_timestamped = true,
+					.fss_generation = state.fss_generation,
+				};
+			});
+		}
 	}
 
+	// pairs with the one in firehose_buffer_tracepoint_reserve()
+	__firehose_critical_region_leave();
+
 #ifndef KERNEL
-	if (unlikely(state.fss_gate.dgl_lock != _dispatch_tid_self())) {
+	_dispatch_trace_firehose_chunk_install(((uint64_t *)ask)[0],
+			((uint64_t *)ask)[1], state.fss_atomic_state,
+			new_state.fss_atomic_state);
+	if (unlikely(state.fss_allocator & FIREHOSE_GATE_WAITERS_MASK)) {
 		_dispatch_gate_broadcast_slow(&fbs->fbs_state.fss_gate,
 				state.fss_gate.dgl_lock);
 	}
@@ -720,19 +1003,25 @@ firehose_buffer_stream_chunk_install(firehose_buffer_t fb,
 	if (unlikely(state.fss_current == FIREHOSE_STREAM_STATE_PRISTINE)) {
 		firehose_buffer_update_limits(fb);
 	}
-#endif // KERNEL
 
-	// pairs with the one in firehose_buffer_tracepoint_reserve()
-	__firehose_critical_region_leave();
+	if (unlikely(os_atomic_load2o(fbh, fbh_quarantined_state, relaxed) ==
+			FBH_QUARANTINE_PENDING)) {
+		if (os_atomic_cmpxchg2o(fbh, fbh_quarantined_state,
+				FBH_QUARANTINE_PENDING, FBH_QUARANTINE_STARTED, relaxed)) {
+			firehose_client_start_quarantine(fb);
+		}
+	}
+#endif // !KERNEL
+
 	return ft;
 }
 
 #ifndef KERNEL
 OS_ALWAYS_INLINE
-static inline uint16_t
+static inline firehose_chunk_ref_t
 firehose_buffer_ring_try_grow(firehose_buffer_bank_t fbb, uint16_t limit)
 {
-	uint16_t ref = 0;
+	firehose_chunk_ref_t ref = 0;
 	uint64_t bitmap;
 
 	_dispatch_unfair_lock_lock(&fbb->fbb_lock);
@@ -746,11 +1035,11 @@ firehose_buffer_ring_try_grow(firehose_buffer_bank_t fbb, uint16_t limit)
 }
 
 OS_ALWAYS_INLINE
-static inline uint16_t
-firehose_buffer_ring_shrink(firehose_buffer_t fb, uint16_t ref)
+static inline firehose_chunk_ref_t
+firehose_buffer_ring_shrink(firehose_buffer_t fb, firehose_chunk_ref_t ref)
 {
 	const size_t madv_size =
-			FIREHOSE_BUFFER_CHUNK_SIZE * FIREHOSE_BUFFER_MADVISE_CHUNK_COUNT;
+			FIREHOSE_CHUNK_SIZE * FIREHOSE_BUFFER_MADVISE_CHUNK_COUNT;
 	const size_t madv_mask =
 			(1ULL << FIREHOSE_BUFFER_MADVISE_CHUNK_COUNT) - 1;
 
@@ -763,7 +1052,7 @@ firehose_buffer_ring_shrink(firehose_buffer_t fb, uint16_t ref)
 	}
 
 	bitmap = (fb->fb_header.fbh_bank.fbb_bitmap &= ~(1UL << ref));
-	ref &= ~madv_mask;
+	ref &= ~(FIREHOSE_BUFFER_MADVISE_CHUNK_COUNT - 1);
 	if ((bitmap & (madv_mask << ref)) == 0) {
 		// if MADVISE_WIDTH consecutive chunks are free, madvise them free
 		madvise(firehose_buffer_ref_to_chunk(fb, ref), madv_size, MADV_FREE);
@@ -777,14 +1066,14 @@ done:
 
 OS_NOINLINE
 void
-firehose_buffer_ring_enqueue(firehose_buffer_t fb, uint16_t ref)
+firehose_buffer_ring_enqueue(firehose_buffer_t fb, firehose_chunk_ref_t ref)
 {
-	firehose_buffer_chunk_t fbc = firehose_buffer_ref_to_chunk(fb, ref);
+	firehose_chunk_t fc = firehose_buffer_ref_to_chunk(fb, ref);
 	uint16_t volatile *fbh_ring;
 	uint16_t volatile *fbh_ring_head;
 	uint16_t head, gen, dummy, idx;
-	firehose_buffer_pos_u fbc_pos = fbc->fbc_pos;
-	bool for_io = fbc_pos.fbc_flag_io;
+	firehose_chunk_pos_u fc_pos = fc->fc_pos;
+	bool for_io = fc_pos.fcp_flag_io;
 
 	if (for_io) {
 		fbh_ring = fb->fb_header.fbh_io_ring;
@@ -809,7 +1098,7 @@ firehose_buffer_ring_enqueue(firehose_buffer_t fb, uint16_t ref)
 	gen = head & FIREHOSE_RING_POS_GEN_MASK;
 	idx = head & FIREHOSE_RING_POS_IDX_MASK;
 
-	while (unlikely(!os_atomic_cmpxchgvw(&fbh_ring[idx], gen, gen | ref, &dummy,
+	while (unlikely(!os_atomic_cmpxchgv(&fbh_ring[idx], gen, gen | ref, &dummy,
 			relaxed))) {
 		// can only ever happen if a recycler is slow, this requires having
 		// enough cores (>5 for I/O e.g.)
@@ -849,9 +1138,9 @@ firehose_buffer_ring_enqueue(firehose_buffer_t fb, uint16_t ref)
 		// a thread being preempted here for GEN_MASK worth of ring rotations,
 		// it could lead to the cmpxchg succeed, and have a bogus enqueue
 		// (confused enqueuer)
-		if (fastpath(os_atomic_cmpxchgvw(&fbh_ring[idx], gen, gen | ref, &dummy,
+		if (likely(os_atomic_cmpxchgv(&fbh_ring[idx], gen, gen | ref, &dummy,
 				relaxed))) {
-			if (fastpath(os_atomic_cmpxchgv(fbh_ring_head, head, head + 1,
+			if (likely(os_atomic_cmpxchgv(fbh_ring_head, head, head + 1,
 					&head, release))) {
 				__firehose_critical_region_leave();
 				break;
@@ -871,29 +1160,42 @@ firehose_buffer_ring_enqueue(firehose_buffer_t fb, uint16_t ref)
 		}));
 	}
 
-	pthread_priority_t pp = fbc_pos.fbc_qos_bits;
+	pthread_priority_t pp = fc_pos.fcp_qos;
 	pp <<= _PTHREAD_PRIORITY_QOS_CLASS_SHIFT;
 	firehose_client_send_push_async(fb, _pthread_qos_class_decode(pp, NULL, NULL),
 			for_io);
 #endif
 }
 
+#ifndef KERNEL
+void
+firehose_buffer_force_connect(firehose_buffer_t fb)
+{
+	mach_port_t sendp = fb->fb_header.fbh_sendp[FIREHOSE_BUFFER_PUSHPORT_MEM];
+	if (sendp == MACH_PORT_NULL) {
+		firehose_client_reconnect(fb, MACH_PORT_NULL,
+				FIREHOSE_BUFFER_PUSHPORT_MEM);
+	}
+}
+#endif
+
 OS_ALWAYS_INLINE
-static inline uint16_t
+static inline firehose_chunk_ref_t
 firehose_buffer_ring_try_recycle(firehose_buffer_t fb)
 {
 	firehose_ring_tail_u pos, old;
 	uint16_t volatile *fbh_ring;
-	uint16_t gen, ref, entry, tail;
-	firehose_buffer_chunk_t fbc;
+	uint16_t gen, entry, tail;
+	firehose_chunk_ref_t ref;
+	firehose_chunk_t fc;
 	bool for_io;
 
 	os_atomic_rmw_loop2o(&fb->fb_header, fbh_ring_tail.frp_atomic_tail,
 			old.frp_atomic_tail, pos.frp_atomic_tail, relaxed, {
 		pos = old;
-		if (fastpath(old.frp_mem_tail != old.frp_mem_flushed)) {
+		if (likely(old.frp_mem_tail != old.frp_mem_flushed)) {
 			pos.frp_mem_tail++;
-		} else if (fastpath(old.frp_io_tail != old.frp_io_flushed)) {
+		} else if (likely(old.frp_io_tail != old.frp_io_flushed)) {
 			pos.frp_io_tail++;
 		} else {
 			os_atomic_rmw_loop_give_up(return 0);
@@ -923,14 +1225,14 @@ firehose_buffer_ring_try_recycle(firehose_buffer_t fb)
 	// and it is dirty, it is a chunk being written to that needs a flush
 	gen = (entry & FIREHOSE_RING_POS_GEN_MASK) + FIREHOSE_RING_POS_GEN_INC;
 	ref = entry & FIREHOSE_RING_POS_IDX_MASK;
-	fbc = firehose_buffer_ref_to_chunk(fb, ref);
+	fc = firehose_buffer_ref_to_chunk(fb, ref);
 
-	if (!for_io && fbc->fbc_pos.fbc_stream == firehose_stream_metadata) {
+	if (!for_io && fc->fc_pos.fcp_stream == firehose_stream_metadata) {
 		os_atomic_and2o(fb, fb_header.fbh_bank.fbb_metadata_bitmap,
 				~(1ULL << ref), relaxed);
 	}
-	os_atomic_store2o(fbc, fbc_pos.fbc_atomic_pos,
-			FIREHOSE_BUFFER_POS_FULL_BIT, relaxed);
+	os_atomic_store2o(fc, fc_pos.fcp_atomic_pos,
+			FIREHOSE_CHUNK_POS_FULL_BIT, relaxed);
 	dispatch_compiler_barrier();
 	os_atomic_store(&fbh_ring[tail], gen | 0, relaxed);
 	return ref;
@@ -939,41 +1241,43 @@ firehose_buffer_ring_try_recycle(firehose_buffer_t fb)
 #ifndef KERNEL
 OS_NOINLINE
 static firehose_tracepoint_t
-firehose_buffer_tracepoint_reserve_slow2(firehose_buffer_t fb,
-		firehose_tracepoint_query_t ask, uint8_t **privptr, uint16_t ref)
+firehose_buffer_tracepoint_reserve_wait_for_chunks_from_logd(firehose_buffer_t fb,
+		firehose_tracepoint_query_t ask, uint8_t **privptr)
 {
-	const uint64_t bank_unavail_mask = FIREHOSE_BANK_UNAVAIL_MASK(ask->for_io);
+	bool for_io = ask->for_io;
+	firehose_buffer_pushport_t pushport = for_io;
 	firehose_buffer_bank_t const fbb = &fb->fb_header.fbh_bank;
 	firehose_bank_state_u state;
-	uint16_t fbs_max_ref;
+	firehose_chunk_ref_t ref, fbs_max_ref;
+
+	for (int i = MACH_PORT_QLIMIT_BASIC;
+			i-- && firehose_drain_notifications_once(fb); );
 
 	// first wait for our bank to have space, if needed
-	if (!fastpath(ask->is_bank_ok)) {
+	if (unlikely(!ask->is_bank_ok)) {
 		state.fbs_atomic_state =
 				os_atomic_load2o(fbb, fbb_state.fbs_atomic_state, relaxed);
-		while (state.fbs_atomic_state & bank_unavail_mask) {
-			firehose_client_send_push(fb, ask->for_io, &state);
-			if (slowpath(fb->fb_header.fbh_sendp == MACH_PORT_DEAD)) {
+		while (!firehose_buffer_bank_try_reserve_slot(fb, for_io, &state)) {
+			if (ask->quarantined) {
+				__FIREHOSE_CLIENT_THROTTLED_DUE_TO_HEAVY_LOGGING__(fb, for_io,
+						&state);
+			} else {
+				firehose_client_send_push_and_wait(fb, for_io, &state);
+			}
+			if (unlikely(fb->fb_header.fbh_sendp[pushport] == MACH_PORT_DEAD)) {
 				// logd was unloaded, give up
 				return NULL;
 			}
 		}
-		ask->is_bank_ok = true;
 		fbs_max_ref = state.fbs_max_ref;
 	} else {
 		fbs_max_ref = fbb->fbb_state.fbs_max_ref;
 	}
 
-	// second, if we were passed a chunk, we may need to shrink
-	if (slowpath(ref)) {
-		goto try_shrink;
-	}
-
 	// third, wait for a chunk to come up, and if not, wait on the daemon
 	for (;;) {
-		if (fastpath(ref = firehose_buffer_ring_try_recycle(fb))) {
-		try_shrink:
-			if (slowpath(ref >= fbs_max_ref)) {
+		if (likely(ref = firehose_buffer_ring_try_recycle(fb))) {
+			if (unlikely(ref >= fbs_max_ref)) {
 				ref = firehose_buffer_ring_shrink(fb, ref);
 				if (!ref) {
 					continue;
@@ -981,11 +1285,16 @@ firehose_buffer_tracepoint_reserve_slow2(firehose_buffer_t fb,
 			}
 			break;
 		}
-		if (fastpath(ref = firehose_buffer_ring_try_grow(fbb, fbs_max_ref))) {
+		if (likely(ref = firehose_buffer_ring_try_grow(fbb, fbs_max_ref))) {
 			break;
 		}
-		firehose_client_send_push(fb, ask->for_io, NULL);
-		if (slowpath(fb->fb_header.fbh_sendp == MACH_PORT_DEAD)) {
+		if (ask->quarantined) {
+			__FIREHOSE_CLIENT_THROTTLED_DUE_TO_HEAVY_LOGGING__(fb, for_io,
+					NULL);
+		} else {
+			firehose_client_send_push_and_wait(fb, for_io, NULL);
+		}
+		if (unlikely(fb->fb_header.fbh_sendp[pushport] == MACH_PORT_DEAD)) {
 			// logd was unloaded, give up
 			break;
 		}
@@ -1001,7 +1310,7 @@ _dispatch_gate_lock_load_seq_cst(dispatch_gate_t l)
 }
 OS_NOINLINE
 static void
-_dispatch_gate_wait(dispatch_gate_t l, uint32_t flags)
+_dispatch_firehose_gate_wait(dispatch_gate_t l, uint32_t flags)
 {
 	(void)flags;
 	_dispatch_wait_until(_dispatch_gate_lock_load_seq_cst(l) == 0);
@@ -1015,41 +1324,60 @@ firehose_buffer_tracepoint_reserve_slow(firehose_buffer_t fb,
 	const unsigned for_io = ask->for_io;
 	const firehose_buffer_bank_t fbb = &fb->fb_header.fbh_bank;
 	firehose_bank_state_u state;
-	uint16_t ref = 0;
+	bool reserved;
+	firehose_chunk_ref_t ref = 0;
 
-	uint64_t unavail_mask = FIREHOSE_BANK_UNAVAIL_MASK(for_io);
 #ifndef KERNEL
-	state.fbs_atomic_state = os_atomic_add_orig2o(fbb,
-			fbb_state.fbs_atomic_state, FIREHOSE_BANK_INC(for_io), relaxed);
-	if (fastpath(!(state.fbs_atomic_state & unavail_mask))) {
-		ask->is_bank_ok = true;
-		if (fastpath(ref = firehose_buffer_ring_try_recycle(fb))) {
-			if (fastpath(ref < state.fbs_max_ref)) {
-				return firehose_buffer_stream_chunk_install(fb, ask,
-						privptr, ref);
+	// before we try to allocate anything look at whether there are things logd
+	// already sent back to us
+	firehose_drain_notifications_once(fb);
+#endif // KERNEL
+
+	state.fbs_atomic_state =
+			os_atomic_load2o(fbb, fbb_state.fbs_atomic_state, relaxed);
+	reserved = firehose_buffer_bank_try_reserve_slot(fb, for_io, &state);
+
+#ifndef KERNEL
+	if (likely(reserved)) {
+		while (!ref) {
+			ref = firehose_buffer_ring_try_recycle(fb);
+			if (unlikely(!ref)) {
+				break;
+			}
+
+			if (unlikely(ref >= state.fbs_max_ref)) {
+				ref = firehose_buffer_ring_shrink(fb, ref);
 			}
 		}
-	}
-	return firehose_buffer_tracepoint_reserve_slow2(fb, ask, privptr, ref);
-#else
-	firehose_bank_state_u value;
-	ask->is_bank_ok = os_atomic_rmw_loop2o(fbb, fbb_state.fbs_atomic_state,
-			state.fbs_atomic_state, value.fbs_atomic_state, relaxed, {
-		value = state;
-		if (slowpath((value.fbs_atomic_state & unavail_mask) != 0)) {
-			os_atomic_rmw_loop_give_up(break);
+
+		if (unlikely(!ref)) {
+			ref = firehose_buffer_ring_try_grow(fbb, state.fbs_max_ref);
 		}
-		value.fbs_atomic_state += FIREHOSE_BANK_INC(for_io);
-	});
-	if (ask->is_bank_ok) {
+	}
+
+	if (likely(ref || !ask->reliable)) {
+		if (!ref && reserved) {
+			firehose_buffer_bank_relinquish_slot(fb, for_io);
+		}
+
+		// installing `0` unlocks the allocator
+		return firehose_buffer_stream_chunk_install(fb, ask, privptr, ref);
+	} else {
+		firehose_buffer_stream_signal_waiting_for_logd(fb, ask->stream);
+
+		ask->is_bank_ok = reserved;
+		return firehose_buffer_tracepoint_reserve_wait_for_chunks_from_logd(fb,
+				ask, privptr);
+	}
+#else
+	if (likely(reserved)) {
 		ref = firehose_buffer_ring_try_recycle(fb);
-		if (slowpath(ref == 0)) {
-			// the kernel has no overlap between I/O and memory chunks,
-			// having an available bank slot means we should be able to recycle
+		if (unlikely(ref == 0)) {
+			// the kernel has no overlap between I/O and memory chunks, so
+			// having an available bank slot means we must be able to recycle
 			DISPATCH_INTERNAL_CRASH(0, "Unable to recycle a chunk");
 		}
 	}
-	// rdar://25137005 installing `0` unlocks the allocator
 	return firehose_buffer_stream_chunk_install(fb, ask, privptr, ref);
 #endif // KERNEL
 }
@@ -1060,37 +1388,11 @@ __firehose_buffer_tracepoint_reserve(uint64_t stamp, firehose_stream_t stream,
 		uint16_t pubsize, uint16_t privsize, uint8_t **privptr)
 {
 	firehose_buffer_t fb = kernel_firehose_buffer;
-	if (!fastpath(fb)) {
+	if (unlikely(!fb)) {
 		return NULL;
 	}
 	return firehose_buffer_tracepoint_reserve(fb, stamp, stream, pubsize,
-			privsize, privptr);
-}
-
-firehose_tracepoint_t
-__firehose_buffer_tracepoint_reserve_with_chunk(firehose_buffer_chunk_t fbc,
-		uint64_t stamp, firehose_stream_t stream,
-		uint16_t pubsize, uint16_t privsize, uint8_t **privptr)
-{
-
-	firehose_tracepoint_t ft;
-	long result;
-
-	result = firehose_buffer_chunk_try_reserve(fbc, stamp, stream,
-			  pubsize, privsize, privptr);
-	if (fastpath(result > 0)) {
-		ft = (firehose_tracepoint_t)(fbc->fbc_start + result);
-		stamp -= fbc->fbc_timestamp;
-		stamp |= (uint64_t)pubsize << 48;
-		// Needed for process death handling (tracepoint-begin)
-		// see firehose_buffer_stream_chunk_install
-		os_atomic_store2o(ft, ft_stamp_and_length, stamp, relaxed);
-		dispatch_compiler_barrier();
-		return ft;
-	}
-	else {
-		return NULL;
-	}
+			privsize, privptr, false);
 }
 
 firehose_buffer_t
@@ -1101,7 +1403,7 @@ __firehose_buffer_create(size_t *size)
 	}
 
 	if (size) {
-		*size = FIREHOSE_BUFFER_KERNEL_CHUNK_COUNT * FIREHOSE_BUFFER_CHUNK_SIZE;
+		*size = FIREHOSE_BUFFER_KERNEL_CHUNK_COUNT * FIREHOSE_CHUNK_SIZE;
 	}
 	return kernel_firehose_buffer;
 }
@@ -1114,33 +1416,21 @@ __firehose_buffer_tracepoint_flush(firehose_tracepoint_t ft,
 }
 
 void
-__firehose_buffer_tracepoint_flush_chunk(firehose_buffer_chunk_t fbc,
-		firehose_tracepoint_t ft, firehose_tracepoint_id_u ftid)
-{
-	firehose_buffer_pos_u pos;
-
-	// Needed for process death handling (tracepoint-flush):
-	// We want to make sure the observers
-	// will see memory effects in program (asm) order.
-	// 1. write all the data to the tracepoint
-	// 2. write the tracepoint ID, so that seeing it means the tracepoint
-	//    is valid
-	ft->ft_thread = thread_tid(current_thread());
-
-	// release barrier makes the log writes visible
-	os_atomic_store2o(ft, ft_id.ftid_value, ftid.ftid_value, release);
-	pos.fbc_atomic_pos = os_atomic_sub2o(fbc, fbc_pos.fbc_atomic_pos,
-			FIREHOSE_BUFFER_POS_REFCNT_INC, relaxed);
-	return;
-}
-
-void
 __firehose_merge_updates(firehose_push_reply_t update)
 {
 	firehose_buffer_t fb = kernel_firehose_buffer;
-	if (fastpath(fb)) {
-		firehose_client_merge_updates(fb, true, update, NULL);
+	if (likely(fb)) {
+		firehose_client_merge_updates(fb, true, update, false, NULL);
 	}
+}
+
+int
+__firehose_kernel_configuration_valid(uint8_t chunk_count, uint8_t io_pages)
+{
+	return (((chunk_count % 4) == 0) &&
+			(chunk_count >= FIREHOSE_BUFFER_KERNEL_MIN_CHUNK_COUNT) &&
+			(chunk_count <= FIREHOSE_BUFFER_KERNEL_MAX_CHUNK_COUNT) &&
+			(io_pages <= (chunk_count * 3 / 4)));
 }
 #endif // KERNEL
 

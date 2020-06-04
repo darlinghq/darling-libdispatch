@@ -54,7 +54,7 @@ OS_OBJECT_DECL_CLASS(voucher_recipe);
  * @result
  * The newly created voucher object.
  */
-__OSX_AVAILABLE_STARTING(__MAC_10_10,__IPHONE_8_0)
+API_AVAILABLE(macos(10.10), ios(8.0))
 OS_EXPORT OS_OBJECT_RETURNS_RETAINED OS_WARN_RESULT OS_NOTHROW
 voucher_t
 voucher_create(voucher_recipe_t recipe);
@@ -78,7 +78,7 @@ voucher_create(voucher_recipe_t recipe);
  * @result
  * A mach voucher port.
  */
-__OSX_AVAILABLE_STARTING(__MAC_10_10,__IPHONE_8_0)
+API_AVAILABLE(macos(10.10), ios(8.0))
 OS_VOUCHER_EXPORT OS_WARN_RESULT OS_NOTHROW
 mach_voucher_t
 voucher_get_mach_voucher(voucher_t voucher);
@@ -90,12 +90,14 @@ voucher_get_mach_voucher(voucher_t voucher);
 void _voucher_init(void);
 void _voucher_atfork_child(void);
 void _voucher_activity_debug_channel_init(void);
+#if OS_VOUCHER_ACTIVITY_SPI && OS_VOUCHER_ACTIVITY_GENERATE_SWAPS
 void _voucher_activity_swap(firehose_activity_id_t old_id,
 		firehose_activity_id_t new_id);
+#endif
 void _voucher_xref_dispose(voucher_t voucher);
 void _voucher_dispose(voucher_t voucher);
 size_t _voucher_debug(voucher_t v, char* buf, size_t bufsiz);
-void _voucher_thread_cleanup(void *voucher);
+void DISPATCH_TSD_DTOR_CC _voucher_thread_cleanup(void *voucher);
 mach_voucher_t _voucher_get_mach_voucher(voucher_t voucher);
 voucher_t _voucher_create_without_importance(voucher_t voucher);
 voucher_t _voucher_create_accounting_voucher(voucher_t voucher);
@@ -121,9 +123,7 @@ void voucher_release(voucher_t voucher);
 #define DISPATCH_VOUCHER_ACTIVITY_DEBUG 1
 #endif
 
-#if VOUCHER_USE_MACH_VOUCHER_PRIORITY
 #include <voucher/ipc_pthread_priority_types.h>
-#endif
 
 typedef uint32_t _voucher_magic_t;
 typedef uint32_t _voucher_priority_t;
@@ -158,7 +158,10 @@ typedef struct voucher_s {
 	struct voucher_vtable_s *os_obj_isa,
 	os_obj_ref_cnt,
 	os_obj_xref_cnt);
-	TAILQ_ENTRY(voucher_s) v_list;
+	struct voucher_hash_entry_s {
+		uintptr_t vhe_next;
+		uintptr_t vhe_prev_ptr;
+	} v_list;
 	mach_voucher_t v_kvoucher, v_ipc_kvoucher; // if equal, only one reference
 	voucher_t v_kvbase; // if non-NULL, v_kvoucher is a borrowed reference
 	firehose_activity_id_t v_activity;
@@ -171,6 +174,53 @@ typedef struct voucher_s {
 	mach_voucher_attr_recipe_size_t v_recipe_extra_size;
 #endif
 } voucher_s;
+
+typedef struct voucher_hash_head_s {
+	uintptr_t vhh_first;
+} voucher_hash_head_s;
+
+DISPATCH_ALWAYS_INLINE
+static inline bool
+_voucher_hash_is_enqueued(const struct voucher_s *v)
+{
+	return v->v_list.vhe_prev_ptr != 0;
+}
+
+DISPATCH_ALWAYS_INLINE
+static inline void
+_voucher_hash_mark_not_enqueued(struct voucher_s *v)
+{
+	v->v_list.vhe_prev_ptr = 0;
+	v->v_list.vhe_next = (uintptr_t)DISPATCH_OBJECT_LISTLESS;
+}
+
+DISPATCH_ALWAYS_INLINE
+static inline void
+_voucher_hash_set_next(uintptr_t *next, struct voucher_s *v)
+{
+	*next = ~(uintptr_t)v;
+}
+
+DISPATCH_ALWAYS_INLINE
+static inline voucher_t
+_voucher_hash_get_next(uintptr_t next)
+{
+	return (voucher_t)~next;
+}
+
+DISPATCH_ALWAYS_INLINE
+static inline void
+_voucher_hash_set_prev_ptr(uintptr_t *prev_ptr, uintptr_t *addr)
+{
+	*prev_ptr = ~(uintptr_t)addr;
+}
+
+DISPATCH_ALWAYS_INLINE
+static inline void
+_voucher_hash_store_to_prev_ptr(uintptr_t prev_ptr, struct voucher_s *v)
+{
+	*(uintptr_t *)~prev_ptr = ~(uintptr_t)v;
+}
 
 #if VOUCHER_ENABLE_RECIPE_OBJECTS
 #define _voucher_extra_size(v) ((v)->v_recipe_extra_size)
@@ -192,7 +242,7 @@ typedef struct voucher_recipe_s {
 } voucher_recipe_s;
 #endif
 
-#if TARGET_OS_EMBEDDED
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
 #define VL_HASH_SIZE  64u // must be a power of two
 #else
 #define VL_HASH_SIZE 256u // must be a power of two
@@ -204,48 +254,54 @@ typedef struct voucher_recipe_s {
 		_dispatch_debug("voucher[%p]: " msg, v, ##__VA_ARGS__)
 #define _dispatch_kvoucher_debug(msg, kv, ...) \
 		_dispatch_debug("kvoucher[0x%08x]: " msg, kv, ##__VA_ARGS__)
-#if DISPATCH_MACHPORT_DEBUG
-#define _dispatch_voucher_debug_machport(name) \
-		dispatch_debug_machport((name), __func__)
-#else
-#define _dispatch_voucher_debug_machport(name) ((void)(name))
-#endif
+#define _dispatch_voucher_debug_machport(name) _dispatch_debug_machport(name)
 #else
 #define _dispatch_voucher_debug(msg, v, ...)
 #define _dispatch_kvoucher_debug(msg, kv, ...)
 #define _dispatch_voucher_debug_machport(name) ((void)(name))
 #endif
 
-#if DISPATCH_PURE_C
+#if DISPATCH_USE_DTRACE_INTROSPECTION && defined(__APPLE__) // rdar://33642820
+#define _voucher_trace(how, ...)  ({ \
+		if (unlikely(VOUCHER_##how##_ENABLED())) { \
+			VOUCHER_##how(__VA_ARGS__); \
+		} \
+	})
+#else
+#define _voucher_trace(how, ...) ((void)0)
+#endif
+
+#ifndef DISPATCH_VOUCHER_OBJC_DEBUG
+#if DISPATCH_INTROSPECTION || DISPATCH_DEBUG
+#define DISPATCH_VOUCHER_OBJC_DEBUG 1
+#else
+#define DISPATCH_VOUCHER_OBJC_DEBUG 0
+#endif
+#endif // DISPATCH_VOUCHER_OBJC_DEBUG
 
 DISPATCH_ALWAYS_INLINE
-static inline voucher_t
-_voucher_retain(voucher_t voucher)
+static inline struct voucher_s *
+_voucher_retain_inline(struct voucher_s *voucher)
 {
-#if !DISPATCH_VOUCHER_OBJC_DEBUG
 	// not using _os_object_refcnt* because we don't need barriers:
 	// vouchers are immutable and are in a hash table with a lock
 	int xref_cnt = os_atomic_inc2o(voucher, os_obj_xref_cnt, relaxed);
+	_voucher_trace(RETAIN, (voucher_t)voucher, xref_cnt + 1);
 	_dispatch_voucher_debug("retain  -> %d", voucher, xref_cnt + 1);
 	if (unlikely(xref_cnt <= 0)) {
 		_OS_OBJECT_CLIENT_CRASH("Voucher resurrection");
 	}
-#else
-	os_retain(voucher);
-	_dispatch_voucher_debug("retain  -> %d", voucher,
-			voucher->os_obj_xref_cnt + 1);
-#endif // DISPATCH_DEBUG
 	return voucher;
 }
 
 DISPATCH_ALWAYS_INLINE
 static inline void
-_voucher_release(voucher_t voucher)
+_voucher_release_inline(struct voucher_s *voucher)
 {
-#if !DISPATCH_VOUCHER_OBJC_DEBUG
 	// not using _os_object_refcnt* because we don't need barriers:
 	// vouchers are immutable and are in a hash table with a lock
 	int xref_cnt = os_atomic_dec2o(voucher, os_obj_xref_cnt, relaxed);
+	_voucher_trace(RELEASE, (voucher_t)voucher, xref_cnt + 1);
 	_dispatch_voucher_debug("release -> %d", voucher, xref_cnt + 1);
 	if (likely(xref_cnt >= 0)) {
 		return;
@@ -253,11 +309,32 @@ _voucher_release(voucher_t voucher)
 	if (unlikely(xref_cnt < -1)) {
 		_OS_OBJECT_CLIENT_CRASH("Voucher over-release");
 	}
-	return _os_object_xref_dispose((_os_object_t)voucher);
+	return _voucher_xref_dispose((voucher_t)voucher);
+}
+
+#if DISPATCH_PURE_C
+
+DISPATCH_ALWAYS_INLINE
+static inline voucher_t
+_voucher_retain(voucher_t voucher)
+{
+#if DISPATCH_VOUCHER_OBJC_DEBUG
+	os_retain(voucher);
 #else
-	_dispatch_voucher_debug("release -> %d", voucher, voucher->os_obj_xref_cnt);
-	return os_release(voucher);
-#endif // DISPATCH_DEBUG
+	_voucher_retain_inline(voucher);
+#endif // DISPATCH_VOUCHER_OBJC_DEBUG
+	return voucher;
+}
+
+DISPATCH_ALWAYS_INLINE
+static inline void
+_voucher_release(voucher_t voucher)
+{
+#if DISPATCH_VOUCHER_OBJC_DEBUG
+	os_release(voucher);
+#else
+	_voucher_release_inline(voucher);
+#endif // DISPATCH_VOUCHER_OBJC_DEBUG
 }
 
 DISPATCH_ALWAYS_INLINE
@@ -268,13 +345,13 @@ _voucher_release_no_dispose(voucher_t voucher)
 	// not using _os_object_refcnt* because we don't need barriers:
 	// vouchers are immutable and are in a hash table with a lock
 	int xref_cnt = os_atomic_dec2o(voucher, os_obj_xref_cnt, relaxed);
+	_voucher_trace(RELEASE, voucher, xref_cnt + 1);
 	_dispatch_voucher_debug("release -> %d", voucher, xref_cnt + 1);
 	if (likely(xref_cnt >= 0)) {
 		return;
 	}
 	_OS_OBJECT_CLIENT_CRASH("Voucher over-release");
 #else
-	_dispatch_voucher_debug("release -> %d", voucher, voucher->os_obj_xref_cnt);
 	return os_release(voucher);
 #endif // DISPATCH_DEBUG
 }
@@ -317,13 +394,17 @@ static inline mach_voucher_t
 _voucher_swap_and_get_mach_voucher(voucher_t ov, voucher_t voucher)
 {
 	if (ov == voucher) return VOUCHER_NO_MACH_VOUCHER;
-	_dispatch_voucher_debug("swap from voucher[%p]", voucher, ov);
+	if (ov) _voucher_trace(ORPHAN, ov);
 	_dispatch_thread_setspecific(dispatch_voucher_key, voucher);
+	if (voucher) _voucher_trace(ADOPT, voucher);
+	_dispatch_voucher_debug("swap from voucher[%p]", voucher, ov);
 	mach_voucher_t kv = voucher ? voucher->v_kvoucher : MACH_VOUCHER_NULL;
 	mach_voucher_t okv = ov ? ov->v_kvoucher : MACH_VOUCHER_NULL;
+#if OS_VOUCHER_ACTIVITY_GENERATE_SWAPS
 	firehose_activity_id_t aid = voucher ? voucher->v_activity : 0;
 	firehose_activity_id_t oaid = ov ? ov->v_activity : 0;
 	if (aid != oaid) _voucher_activity_swap(aid, oaid);
+#endif
 	return (kv != okv) ? kv : VOUCHER_NO_MACH_VOUCHER;
 }
 
@@ -494,7 +575,7 @@ _dispatch_voucher_ktrace(uint32_t code, voucher_t v, const void *container)
 DISPATCH_ALWAYS_INLINE
 static inline void
 _dispatch_continuation_voucher_set(dispatch_continuation_t dc,
-		dispatch_queue_class_t dqu, dispatch_block_flags_t flags)
+		dispatch_block_flags_t flags)
 {
 	voucher_t v = NULL;
 
@@ -503,16 +584,7 @@ _dispatch_continuation_voucher_set(dispatch_continuation_t dc,
 	// only _dispatch_continuation_init_slow handles this bit.
 	dispatch_assert(!(flags & DISPATCH_BLOCK_HAS_VOUCHER));
 
-	if (dqu._oq->oq_override_voucher != DISPATCH_NO_VOUCHER) {
-		// if the queue has an override voucher, we should not capture anything
-		//
-		// if the continuation is enqueued before the queue is activated, then
-		// this optimization fails and we do capture whatever is current
-		//
-		// _dispatch_continuation_voucher_adopt() would do the right thing
-		// but using DISPATCH_NO_VOUCHER here is more efficient.
-		v = DISPATCH_NO_VOUCHER;
-	} else if (!(flags & DISPATCH_BLOCK_NO_VOUCHER)) {
+	if (!(flags & DISPATCH_BLOCK_NO_VOUCHER)) {
 		v = _voucher_copy();
 	}
 	dc->dc_voucher = v;
@@ -520,16 +592,14 @@ _dispatch_continuation_voucher_set(dispatch_continuation_t dc,
 	_dispatch_voucher_ktrace_dc_push(dc);
 }
 
-static inline dispatch_queue_t _dispatch_queue_get_current(void);
-
 DISPATCH_ALWAYS_INLINE
 static inline void
 _dispatch_continuation_voucher_adopt(dispatch_continuation_t dc,
-		voucher_t ov, uintptr_t dc_flags)
+		uintptr_t dc_flags)
 {
 	voucher_t v = dc->dc_voucher;
-	_dispatch_thread_set_self_t consume = (dc_flags & DISPATCH_OBJ_CONSUME_BIT);
-	dispatch_assert(DISPATCH_OBJ_CONSUME_BIT == DISPATCH_VOUCHER_CONSUME);
+	dispatch_thread_set_self_t consume = (dc_flags & DC_FLAG_CONSUME);
+	dispatch_assert(DC_FLAG_CONSUME == DISPATCH_VOUCHER_CONSUME);
 
 	if (consume) {
 		dc->dc_voucher = VOUCHER_INVALID;
@@ -537,17 +607,6 @@ _dispatch_continuation_voucher_adopt(dispatch_continuation_t dc,
 	if (likely(v != DISPATCH_NO_VOUCHER)) {
 		_dispatch_voucher_ktrace_dc_pop(dc, v);
 		_dispatch_voucher_debug("continuation[%p] adopt", v, dc);
-
-		if (likely(!(dc_flags & DISPATCH_OBJ_ENFORCE_VOUCHER))) {
-			if (unlikely(ov != DISPATCH_NO_VOUCHER && v != ov)) {
-				if (consume) _voucher_release(v);
-				consume = 0;
-				v = ov;
-			}
-		}
-	} else {
-		consume = 0;
-		v = ov;
 	}
 	(void)_dispatch_adopt_priority_and_set_voucher(dc->dc_priority, v,
 			consume | DISPATCH_VOUCHER_REPLACE);
@@ -685,17 +744,17 @@ _voucher_mach_msg_clear(mach_msg_header_t *msg, bool move_send)
 DISPATCH_ALWAYS_INLINE
 static inline void
 _dispatch_continuation_voucher_set(dispatch_continuation_t dc,
-		dispatch_queue_class_t dqu, dispatch_block_flags_t flags)
+		dispatch_block_flags_t flags)
 {
-	(void)dc; (void)dqu; (void)flags;
+	(void)dc; (void)flags;
 }
 
 DISPATCH_ALWAYS_INLINE
 static inline void
-_dispatch_continuation_voucher_adopt(dispatch_continuation_t dc, voucher_t ov,
+_dispatch_continuation_voucher_adopt(dispatch_continuation_t dc,
 		uintptr_t dc_flags)
 {
-	(void)dc; (void)ov; (void)dc_flags;
+	(void)dc; (void)dc_flags;
 }
 
 #endif // VOUCHER_USE_MACH_VOUCHER

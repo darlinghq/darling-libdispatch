@@ -58,7 +58,27 @@ typedef struct { void *a; void *b; } dispatch_tsd_pair_t;
 #endif // _os_tsd_get_base
 #endif
 
+#if defined(_WIN32)
+#define DISPATCH_TSD_DTOR_CC __stdcall
+#else
+#define DISPATCH_TSD_DTOR_CC
+#endif
+
 #if DISPATCH_USE_DIRECT_TSD
+#ifndef __TSD_THREAD_QOS_CLASS
+#define __TSD_THREAD_QOS_CLASS 4
+#endif
+#ifndef __TSD_RETURN_TO_KERNEL
+#define __TSD_RETURN_TO_KERNEL 5
+#endif
+#ifndef __TSD_MACH_SPECIAL_REPLY
+#define __TSD_MACH_SPECIAL_REPLY 8
+#endif
+
+
+static const unsigned long dispatch_priority_key	= __TSD_THREAD_QOS_CLASS;
+static const unsigned long dispatch_r2k_key			= __TSD_RETURN_TO_KERNEL;
+
 // dispatch_queue_key & dispatch_frame_key need to be contiguous
 // in that order, and queue_key to be an even number
 static const unsigned long dispatch_queue_key		= __PTK_LIBDISPATCH_KEY0;
@@ -67,21 +87,13 @@ static const unsigned long dispatch_cache_key		= __PTK_LIBDISPATCH_KEY2;
 static const unsigned long dispatch_context_key		= __PTK_LIBDISPATCH_KEY3;
 static const unsigned long dispatch_pthread_root_queue_observer_hooks_key =
 		__PTK_LIBDISPATCH_KEY4;
-static const unsigned long dispatch_defaultpriority_key =__PTK_LIBDISPATCH_KEY5;
+static const unsigned long dispatch_basepri_key     = __PTK_LIBDISPATCH_KEY5;
 #if DISPATCH_INTROSPECTION
 static const unsigned long dispatch_introspection_key = __PTK_LIBDISPATCH_KEY6;
 #elif DISPATCH_PERF_MON
 static const unsigned long dispatch_bcounter_key	= __PTK_LIBDISPATCH_KEY6;
 #endif
-static const unsigned long dispatch_sema4_key		= __PTK_LIBDISPATCH_KEY7;
-
-#ifndef __TSD_THREAD_QOS_CLASS
-#define __TSD_THREAD_QOS_CLASS 4
-#endif
-#ifndef __TSD_THREAD_VOUCHER
-#define __TSD_THREAD_VOUCHER 6
-#endif
-static const unsigned long dispatch_priority_key	= __TSD_THREAD_QOS_CLASS;
+static const unsigned long dispatch_wlh_key			= __PTK_LIBDISPATCH_KEY7;
 static const unsigned long dispatch_voucher_key		= __PTK_LIBDISPATCH_KEY8;
 static const unsigned long dispatch_deferred_items_key = __PTK_LIBDISPATCH_KEY9;
 
@@ -94,36 +106,56 @@ _dispatch_thread_key_create(const unsigned long *k, void (*d)(void *))
 }
 #elif DISPATCH_USE_THREAD_LOCAL_STORAGE
 
+#if defined(_WIN32)
+
 DISPATCH_TSD_INLINE
 static inline void
-_dispatch_thread_key_create(pthread_key_t *k, void (*d)(void *))
+_dispatch_thread_key_create(DWORD *k, void (DISPATCH_TSD_DTOR_CC *d)(void *))
+{
+	dispatch_assert_zero((*k = FlsAlloc(d)));
+}
+
+extern DWORD __dispatch_tsd_key;
+
+#else
+
+DISPATCH_TSD_INLINE
+static inline void
+_dispatch_thread_key_create(pthread_key_t *k, void (DISPATCH_TSD_DTOR_CC *d)(void *))
 {
 	dispatch_assert_zero(pthread_key_create(k, d));
 }
 
+extern pthread_key_t __dispatch_tsd_key;
+
+#endif
+
 struct dispatch_tsd {
+#if defined(_WIN32)
+	DWORD tid;
+#else
 	pid_t tid;
+#endif
 	void *dispatch_queue_key;
 	void *dispatch_frame_key;
 	void *dispatch_cache_key;
 	void *dispatch_context_key;
 	void *dispatch_pthread_root_queue_observer_hooks_key;
-	void *dispatch_defaultpriority_key;
+	void *dispatch_basepri_key;
 #if DISPATCH_INTROSPECTION
 	void *dispatch_introspection_key;
 #elif DISPATCH_PERF_MON
 	void *dispatch_bcounter_key;
 #endif
-#if DISPATCH_LOCK_USE_SEMAPHORE_FALLBACK
-	void *dispatch_sema4_key;
-#endif
 	void *dispatch_priority_key;
+	void *dispatch_r2k_key;
+	void *dispatch_wlh_key;
 	void *dispatch_voucher_key;
 	void *dispatch_deferred_items_key;
 };
 
-extern __thread struct dispatch_tsd __dispatch_tsd;
-extern pthread_key_t __dispatch_tsd_key;
+extern _Thread_local struct dispatch_tsd __dispatch_tsd;
+
 extern void libdispatch_tsd_init(void);
 extern void _libdispatch_tsd_cleanup(void *ctx);
 
@@ -160,19 +192,20 @@ _dispatch_get_tsd_base(void)
 	  _dispatch_thread_setspecific(k2,(p)[1]) )
 
 #else
+extern pthread_key_t dispatch_priority_key;
+extern pthread_key_t dispatch_r2k_key;
 extern pthread_key_t dispatch_queue_key;
 extern pthread_key_t dispatch_frame_key;
 extern pthread_key_t dispatch_cache_key;
 extern pthread_key_t dispatch_context_key;
 extern pthread_key_t dispatch_pthread_root_queue_observer_hooks_key;
-extern pthread_key_t dispatch_defaultpriority_key;
+extern pthread_key_t dispatch_basepri_key;
 #if DISPATCH_INTROSPECTION
 extern pthread_key_t dispatch_introspection_key;
 #elif DISPATCH_PERF_MON
 extern pthread_key_t dispatch_bcounter_key;
 #endif
-extern pthread_key_t dispatch_sema4_key;
-extern pthread_key_t dispatch_priority_key;
+extern pthread_key_t dispatch_wlh_key;
 extern pthread_key_t dispatch_voucher_key;
 extern pthread_key_t dispatch_deferred_items_key;
 
@@ -193,7 +226,7 @@ _dispatch_thread_setspecific(pthread_key_t k, void *v)
 	if (_pthread_has_direct_tsd()) {
 		(void)_pthread_setspecific_direct(k, v);
 	} else {
-#if TARGET_IPHONE_SIMULATOR
+#if TARGET_OS_SIMULATOR
 		(void)_pthread_setspecific_static(k, v); // rdar://26058142
 #else
 		__builtin_trap(); // unreachable
@@ -280,7 +313,7 @@ _dispatch_thread_setspecific_packed_pair(pthread_key_t k1, pthread_key_t k2,
 }
 #endif
 
-#if TARGET_OS_WIN32
+#if defined(_WIN32)
 #define _dispatch_thread_self() ((uintptr_t)GetCurrentThreadId())
 #else
 #if DISPATCH_USE_DIRECT_TSD
@@ -291,7 +324,7 @@ _dispatch_thread_setspecific_packed_pair(pthread_key_t k1, pthread_key_t k2,
 #endif
 #endif
 
-#if TARGET_OS_WIN32
+#if defined(_WIN32)
 #define _dispatch_thread_port() ((mach_port_t)0)
 #elif !DISPATCH_USE_THREAD_LOCAL_STORAGE
 #if DISPATCH_USE_DIRECT_TSD
@@ -307,6 +340,11 @@ _dispatch_thread_setspecific_packed_pair(pthread_key_t k1, pthread_key_t k2,
 		_dispatch_thread_getspecific(_PTHREAD_TSD_SLOT_MIG_REPLY))
 #define _dispatch_set_thread_mig_reply_port(p) ( \
 		_dispatch_thread_setspecific(_PTHREAD_TSD_SLOT_MIG_REPLY, \
+		(void*)(uintptr_t)(p)))
+#define _dispatch_get_thread_special_reply_port() ((mach_port_t)(uintptr_t) \
+		_dispatch_thread_getspecific(__TSD_MACH_SPECIAL_REPLY))
+#define _dispatch_set_thread_special_reply_port(p) ( \
+		_dispatch_thread_setspecific(__TSD_MACH_SPECIAL_REPLY, \
 		(void*)(uintptr_t)(p)))
 #endif
 

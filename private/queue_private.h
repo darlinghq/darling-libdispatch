@@ -47,6 +47,106 @@ enum {
 	DISPATCH_QUEUE_OVERCOMMIT = 0x2ull,
 };
 
+/*!
+ * @function dispatch_set_qos_class
+ *
+ * @abstract
+ * Sets the QOS class on a dispatch queue, source or mach channel.
+ *
+ * @discussion
+ * This is equivalent to using dispatch_queue_make_attr_with_qos_class()
+ * when creating a dispatch queue, but is availabile on additional dispatch
+ * object types.
+ *
+ * When configured in this manner, the specified QOS class will be used over
+ * the assigned QOS of workitems submitted asynchronously to this object,
+ * unless the workitem has been created with ENFORCE semantics
+ * (see DISPATCH_BLOCK_ENFORCE_QOS_CLASS).
+ *
+ * Calling this function will supersede any prior calls to
+ * dispatch_set_qos_class() or dispatch_set_qos_class_floor().
+ *
+ * @param object
+ * A dispatch queue, source or mach channel to configure.
+ * The object must be inactive, and can't be a workloop.
+ *
+ * Passing another object type or an object that has been activated is undefined
+ * and will cause the process to be terminated.
+ *
+ * @param qos_class
+ * A QOS class value:
+ *  - QOS_CLASS_USER_INTERACTIVE
+ *  - QOS_CLASS_USER_INITIATED
+ *  - QOS_CLASS_DEFAULT
+ *  - QOS_CLASS_UTILITY
+ *  - QOS_CLASS_BACKGROUND
+ * Passing any other value is undefined.
+ *
+ * @param relative_priority
+ * A relative priority within the QOS class. This value is a negative
+ * offset from the maximum supported scheduler priority for the given class.
+ * Passing a value greater than zero or less than QOS_MIN_RELATIVE_PRIORITY
+ * is undefined.
+ */
+API_AVAILABLE(macos(10.14), ios(12.0), tvos(12.0), watchos(5.0))
+DISPATCH_EXPORT DISPATCH_NOTHROW
+void
+dispatch_set_qos_class(dispatch_object_t object,
+		dispatch_qos_class_t qos_class, int relative_priority);
+
+/*!
+ * @function dispatch_set_qos_class_fallback
+ *
+ * @abstract
+ * Sets the fallback QOS class on a dispatch queue, source, workloop or mach
+ * channel.
+ *
+ * @discussion
+ * Workitems submitted asynchronously to this object that don't have an assigned
+ * QOS class will use the specified QOS class as a fallback. This interface
+ * doesn't support relative priority.
+ *
+ * Workitems without an assigned QOS are:
+ * - workitems submitted from the context of a thread opted-out of QOS,
+ * - workitems created with the DISPATCH_BLOCK_DETACHED or
+ *   DISPATCH_BLOCK_NO_QOS_CLASS flags,
+ * - XPC messages sent with xpc_connection_send_notification(),
+ * - XPC connection and dispatch source handlers.
+ *
+ * Calling both dispatch_set_qos_class_fallback() and dispatch_set_qos_class()
+ * on an object will only apply the effect of dispatch_set_qos_class().
+ *
+ * A QOS class fallback must always be at least as high as the current QOS
+ * floor for the dispatch queue hierarchy, else it is ignored.
+ *
+ * When no QOS fallback has been explicitly specified:
+ * - queues on hierarchies without a QOS class or QOS class floor have
+ *   a fallback of QOS_CLASS_DEFAULT,
+ * - queues on hierarchies with a QOS class or QOS class floor configured will
+ *   also use that QOS class as a fallback.
+ *
+ * @param object
+ * A dispatch queue, workloop, source or mach channel to configure.
+ * The object must be inactive.
+ *
+ * Passing another object type or an object that has been activated is undefined
+ * and will cause the process to be terminated.
+ *
+ * @param qos_class
+ * A QOS class value:
+ *  - QOS_CLASS_USER_INTERACTIVE
+ *  - QOS_CLASS_USER_INITIATED
+ *  - QOS_CLASS_DEFAULT
+ *  - QOS_CLASS_UTILITY
+ *  - QOS_CLASS_BACKGROUND
+ * Passing any other value is undefined.
+ */
+API_AVAILABLE(macos(10.14), ios(12.0), tvos(12.0), watchos(5.0))
+DISPATCH_EXPORT DISPATCH_NOTHROW
+void
+dispatch_set_qos_class_fallback(dispatch_object_t object,
+		dispatch_qos_class_t qos_class);
+
 #define DISPATCH_QUEUE_FLAGS_MASK (DISPATCH_QUEUE_OVERCOMMIT)
 
 /*!
@@ -63,7 +163,7 @@ enum {
  *
  * It is recommended to not specify a target queue at all when using this
  * attribute and to use dispatch_queue_attr_make_with_qos_class() to select the
- * appropriate QoS class instead.
+ * appropriate QOS class instead.
  *
  * Queues created with this attribute cannot change target after having been
  * activated. See dispatch_set_target_queue() and dispatch_activate().
@@ -79,7 +179,7 @@ enum {
  * This new value combines the attributes specified by the 'attr' parameter and
  * the overcommit flag.
  */
-__OSX_AVAILABLE_STARTING(__MAC_10_10, __IPHONE_8_0)
+API_AVAILABLE(macos(10.10), ios(8.0))
 DISPATCH_EXPORT DISPATCH_WARN_RESULT DISPATCH_PURE DISPATCH_NOTHROW
 dispatch_queue_attr_t
 dispatch_queue_attr_make_with_overcommit(dispatch_queue_attr_t _Nullable attr,
@@ -99,6 +199,40 @@ dispatch_queue_attr_make_with_overcommit(dispatch_queue_attr_t _Nullable attr,
 #define DISPATCH_QUEUE_PRIORITY_NON_INTERACTIVE INT8_MIN
 
 /*!
+ * @function dispatch_queue_set_label_nocopy
+ *
+ * @abstract
+ * Set the label for a given queue, without copying the input string.
+ *
+ * @discussion
+ * The queue must have been initially created with a NULL label, else using
+ * this function to set the queue label is undefined.
+ *
+ * The caller of this function must make sure the label pointer remains valid
+ * while it is used as the queue label and while any callers to
+ * dispatch_queue_get_label() may have obtained it. Since the queue lifetime
+ * may extend past the last release, it is advised to call this function with
+ * a constant string or NULL before the queue is released, or to destroy the
+ * label from a finalizer for that queue.
+ *
+ * This function should be called before any work item could call
+ * dispatch_queue_get_label(DISPATCH_CURRENT_QUEUE_LABEL) or from the context of
+ * the queue itself.
+ *
+ * @param queue
+ * The queue to adjust. Attempts to set the label of the main queue or a global
+ * concurrent queue will be ignored.
+ *
+ * @param label
+ * The new label for the queue.
+ */
+API_AVAILABLE(macos(10.13), ios(11.0), tvos(11.0), watchos(4.0))
+DISPATCH_EXPORT DISPATCH_NONNULL1 DISPATCH_NOTHROW
+void
+dispatch_queue_set_label_nocopy(dispatch_queue_t queue,
+		const char * _Nullable label);
+
+/*!
  * @function dispatch_queue_set_width
  *
  * @abstract
@@ -115,8 +249,8 @@ dispatch_queue_attr_make_with_overcommit(dispatch_queue_attr_t _Nullable attr,
  * with the desired concurrency width.
  *
  * @param queue
- * The queue to adjust. Passing the main queue or a global concurrent queue
- * will be ignored.
+ * The queue to adjust. Attempts to set the width of the main queue or a global
+ * concurrent queue will be ignored.
  *
  * @param width
  * The new maximum width of concurrency depending on available resources.
@@ -128,13 +262,13 @@ dispatch_queue_attr_make_with_overcommit(dispatch_queue_attr_t _Nullable attr,
 #define DISPATCH_QUEUE_WIDTH_MAX_PHYSICAL_CPUS	-2
 #define DISPATCH_QUEUE_WIDTH_MAX_LOGICAL_CPUS	-3
 
-__OSX_AVAILABLE_BUT_DEPRECATED_MSG(__MAC_10_6,__MAC_10_10,__IPHONE_4_0,__IPHONE_8_0, \
-		"Use dispatch_queue_create(name, DISPATCH_QUEUE_CONCURRENT) instead")
+API_DEPRECATED("Use dispatch_queue_create(name, DISPATCH_QUEUE_CONCURRENT)",
+		macos(10.6,10.10), ios(4.0,8.0))
 DISPATCH_EXPORT DISPATCH_NONNULL_ALL DISPATCH_NOTHROW
 void
 dispatch_queue_set_width(dispatch_queue_t dq, long width);
 
-#ifdef __BLOCKS__
+#if defined(__BLOCKS__) && defined(__APPLE__)
 /*!
  * @function dispatch_pthread_root_queue_create
  *
@@ -189,13 +323,13 @@ dispatch_queue_set_width(dispatch_queue_t dq, long width);
  * @result
  * The newly created dispatch pthread root queue.
  */
-__OSX_AVAILABLE_STARTING(__MAC_10_9,__IPHONE_6_0)
+API_AVAILABLE(macos(10.9), ios(6.0)) DISPATCH_LINUX_UNAVAILABLE()
 DISPATCH_EXPORT DISPATCH_MALLOC DISPATCH_RETURNS_RETAINED DISPATCH_WARN_RESULT
 DISPATCH_NOTHROW
-dispatch_queue_t
+dispatch_queue_global_t
 dispatch_pthread_root_queue_create(const char *_Nullable label,
-	unsigned long flags, const pthread_attr_t *_Nullable attr,
-	dispatch_block_t _Nullable configure);
+		unsigned long flags, const pthread_attr_t *_Nullable attr,
+		dispatch_block_t _Nullable configure);
 
 /*!
  * @function dispatch_pthread_root_queue_flags_pool_size
@@ -225,8 +359,6 @@ dispatch_pthread_root_queue_flags_pool_size(uint8_t pool_size)
 			(unsigned long)pool_size);
 }
 
-#endif /* __BLOCKS__ */
-
 /*!
  * @function dispatch_pthread_root_queue_copy_current
  *
@@ -238,21 +370,24 @@ dispatch_pthread_root_queue_flags_pool_size(uint8_t pool_size)
  * @result
  * A new reference to a pthread root queue object or NULL.
  */
-__OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0)
-__TVOS_AVAILABLE(10.0) __WATCHOS_AVAILABLE(3.0)
+API_AVAILABLE(macos(10.12), ios(10.0), tvos(10.0), watchos(3.0))
+DISPATCH_LINUX_UNAVAILABLE()
 DISPATCH_EXPORT DISPATCH_RETURNS_RETAINED DISPATCH_WARN_RESULT DISPATCH_NOTHROW
-dispatch_queue_t _Nullable
+dispatch_queue_global_t _Nullable
 dispatch_pthread_root_queue_copy_current(void);
 
 /*!
  * @constant DISPATCH_APPLY_CURRENT_ROOT_QUEUE
- * @discussion Constant to pass to the dispatch_apply() and dispatch_apply_f()
- * functions to indicate that the root queue for the current thread should be
- * used (i.e. one of the global concurrent queues or a queue created with
- * dispatch_pthread_root_queue_create()). If there is no such queue, the
- * default priority global concurrent queue will be used.
+ *
+ * @discussion
+ * This constant is deprecated, please use DISPATCH_APPLY_AUTO.
+ *
+ * DISPATCH_APPLY_AUTO also selects the current pthread root queue if
+ * applicable.
  */
 #define DISPATCH_APPLY_CURRENT_ROOT_QUEUE ((dispatch_queue_t _Nonnull)0)
+
+#endif /* defined(__BLOCKS__) && defined(__APPLE__) */
 
 /*!
  * @function dispatch_async_enforce_qos_class_f
@@ -284,12 +419,26 @@ dispatch_pthread_root_queue_copy_current(void);
  * dispatch_async_f().
  * The result of passing NULL in this parameter is undefined.
  */
-__OSX_AVAILABLE_STARTING(__MAC_10_11,__IPHONE_9_0)
+API_AVAILABLE(macos(10.11), ios(9.0))
 DISPATCH_EXPORT DISPATCH_NONNULL1 DISPATCH_NONNULL3 DISPATCH_NOTHROW
 void
 dispatch_async_enforce_qos_class_f(dispatch_queue_t queue,
-	void *_Nullable context, dispatch_function_t work);
+		void *_Nullable context, dispatch_function_t work);
 
+#ifdef __ANDROID__
+/*!
+ * @function _dispatch_install_thread_detach_callback
+ *
+ * @param cb
+ * Function to be called before each worker thread exits to detach JVM.
+ *
+ * Hook to be able to detach threads from the Java JVM before they exit.
+ * If JNI has been used on a thread on Android it needs to have been
+ * "detached" before the thread exits or the application will crash.
+ */
+DISPATCH_EXPORT
+void _dispatch_install_thread_detach_callback(dispatch_function_t cb);
+#endif
 
 __END_DECLS
 

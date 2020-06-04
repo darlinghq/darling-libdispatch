@@ -28,7 +28,14 @@
 #define __DISPATCH_PRIVATE__
 
 #ifdef __APPLE__
+#include <Availability.h>
+#include <os/availability.h>
 #include <TargetConditionals.h>
+#include <os/base.h>
+#elif defined(_WIN32)
+#include <os/generic_win_base.h>
+#elif defined(__unix__)
+#include <os/generic_unix_base.h>
 #endif
 
 #if TARGET_OS_MAC
@@ -36,13 +43,15 @@
 #include <mach/mach.h>
 #include <mach/message.h>
 #endif
-#if HAVE_UNISTD_H
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
 #include <unistd.h>
 #endif
-#if HAVE_SYS_CDEFS_H
-#include <sys/cdefs.h>
-#endif
+#if !defined(_WIN32)
 #include <pthread.h>
+#endif
+#if TARGET_OS_MAC
+#include <pthread/qos.h>
+#endif
 
 #ifndef __DISPATCH_BUILDING_DISPATCH__
 #include <dispatch/dispatch.h>
@@ -53,20 +62,22 @@
 
 #include <dispatch/benchmark.h>
 #include <dispatch/queue_private.h>
+#if DISPATCH_CHANNEL_SPI
+#include <dispatch/channel_private.h>
+#endif
+#include <dispatch/workloop_private.h>
 #include <dispatch/source_private.h>
-#if DISPATCH_MACH_SPI
 #include <dispatch/mach_private.h>
-#endif // DISPATCH_MACH_SPI
 #include <dispatch/data_private.h>
 #include <dispatch/io_private.h>
 #include <dispatch/layout_private.h>
+#include <dispatch/time_private.h>
 
 #undef __DISPATCH_INDIRECT__
-
 #endif /* !__DISPATCH_BUILDING_DISPATCH__ */
 
 // <rdar://problem/9627726> Check that public and private dispatch headers match
-#if DISPATCH_API_VERSION != 20160712 // Keep in sync with <dispatch/dispatch.h>
+#if DISPATCH_API_VERSION != 20181008 // Keep in sync with <dispatch/dispatch.h>
 #error "Dispatch header mismatch between /usr/include and /usr/local/include"
 #endif
 
@@ -93,7 +104,7 @@ __BEGIN_DECLS
  * Boolean indicating whether the process has used libdispatch and become
  * multithreaded.
  */
-__OSX_AVAILABLE_STARTING(__MAC_10_8,__IPHONE_6_0)
+API_AVAILABLE(macos(10.8), ios(6.0))
 DISPATCH_EXPORT DISPATCH_NOTHROW
 bool _dispatch_is_multithreaded(void);
 
@@ -117,7 +128,7 @@ bool _dispatch_is_multithreaded(void);
  * Boolean indicating whether the parent process had used libdispatch and
  * become multithreaded at the time of fork.
  */
-__OSX_AVAILABLE_STARTING(__MAC_10_9,__IPHONE_7_0)
+API_AVAILABLE(macos(10.9), ios(7.0))
 DISPATCH_EXPORT DISPATCH_NOTHROW
 bool _dispatch_is_fork_of_multithreaded_parent(void);
 
@@ -144,8 +155,7 @@ bool _dispatch_is_fork_of_multithreaded_parent(void);
  * If the program already used dispatch before the guard is enabled, then
  * this function will abort immediately.
  */
-__OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0)
-__TVOS_AVAILABLE(10.0) __WATCHOS_AVAILABLE(3.0)
+API_AVAILABLE(macos(10.12), ios(10.0), tvos(10.0), watchos(3.0))
 DISPATCH_EXPORT DISPATCH_NOTHROW
 void _dispatch_prohibit_transition_to_multithreaded(bool prohibit);
 
@@ -168,7 +178,7 @@ void _dispatch_prohibit_transition_to_multithreaded(bool prohibit);
 
 #if TARGET_OS_MAC
 #define DISPATCH_COCOA_COMPAT 1
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__FreeBSD__)
 #define DISPATCH_COCOA_COMPAT 1
 #else
 #define DISPATCH_COCOA_COMPAT 0
@@ -180,76 +190,78 @@ void _dispatch_prohibit_transition_to_multithreaded(bool prohibit);
 
 #if TARGET_OS_MAC
 typedef mach_port_t dispatch_runloop_handle_t;
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__FreeBSD__)
 typedef int dispatch_runloop_handle_t;
 #else
 #error "runloop support not implemented on this platform"
 #endif
 
 #if TARGET_OS_MAC
-__OSX_AVAILABLE_STARTING(__MAC_10_6,__IPHONE_4_0)
+API_AVAILABLE(macos(10.6), ios(4.0))
 DISPATCH_EXPORT DISPATCH_CONST DISPATCH_WARN_RESULT DISPATCH_NOTHROW
 dispatch_runloop_handle_t
 _dispatch_get_main_queue_port_4CF(void);
 #endif
 
-__OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0)
-__TVOS_AVAILABLE(10.0) __WATCHOS_AVAILABLE(3.0)
+API_AVAILABLE(macos(10.12), ios(10.0), tvos(10.0), watchos(3.0))
 DISPATCH_EXPORT DISPATCH_NOTHROW
 dispatch_runloop_handle_t
 _dispatch_get_main_queue_handle_4CF(void);
 
-#if TARGET_OS_MAC
-__OSX_AVAILABLE_STARTING(__MAC_10_6,__IPHONE_4_0)
-DISPATCH_EXPORT DISPATCH_NOTHROW
-void
-_dispatch_main_queue_callback_4CF(mach_msg_header_t *_Null_unspecified msg);
-#else
-__OSX_AVAILABLE_STARTING(__MAC_10_6,__IPHONE_4_0)
+API_AVAILABLE(macos(10.6), ios(4.0))
 DISPATCH_EXPORT DISPATCH_NOTHROW
 void
 _dispatch_main_queue_callback_4CF(void *_Null_unspecified msg);
-#endif
 
-__OSX_AVAILABLE_STARTING(__MAC_10_9,__IPHONE_7_0)
+API_AVAILABLE(macos(10.9), ios(7.0))
 DISPATCH_EXPORT DISPATCH_MALLOC DISPATCH_RETURNS_RETAINED DISPATCH_WARN_RESULT
 DISPATCH_NOTHROW
-dispatch_queue_t
+dispatch_queue_serial_t
 _dispatch_runloop_root_queue_create_4CF(const char *_Nullable label,
 		unsigned long flags);
 
 #if TARGET_OS_MAC
-__OSX_AVAILABLE_STARTING(__MAC_10_9,__IPHONE_7_0)
+API_AVAILABLE(macos(10.9), ios(7.0))
 DISPATCH_EXPORT DISPATCH_WARN_RESULT DISPATCH_NOTHROW
 mach_port_t
 _dispatch_runloop_root_queue_get_port_4CF(dispatch_queue_t queue);
+
+API_AVAILABLE(macos(10.13.2), ios(11.2), tvos(11.2), watchos(4.2))
+DISPATCH_EXPORT DISPATCH_WARN_RESULT DISPATCH_NOTHROW
+bool
+_dispatch_source_will_reenable_kevent_4NW(dispatch_source_t source);
 #endif
 
-__OSX_AVAILABLE_STARTING(__MAC_10_9,__IPHONE_7_0)
+API_AVAILABLE(macos(10.9), ios(7.0))
 DISPATCH_EXPORT DISPATCH_NOTHROW
 void
 _dispatch_runloop_root_queue_wakeup_4CF(dispatch_queue_t queue);
 
-__OSX_AVAILABLE_STARTING(__MAC_10_9,__IPHONE_7_0)
+API_AVAILABLE(macos(10.9), ios(7.0))
 DISPATCH_EXPORT DISPATCH_WARN_RESULT DISPATCH_NOTHROW
 bool
 _dispatch_runloop_root_queue_perform_4CF(dispatch_queue_t queue);
 
-__OSX_AVAILABLE_STARTING(__MAC_10_9,__IPHONE_7_0)
+API_AVAILABLE(macos(10.9), ios(7.0))
 DISPATCH_EXPORT DISPATCH_NONNULL_ALL DISPATCH_NOTHROW
 void
 _dispatch_source_set_runloop_timer_4CF(dispatch_source_t source,
 		dispatch_time_t start, uint64_t interval, uint64_t leeway);
 
-__OSX_AVAILABLE_STARTING(__MAC_10_6,__IPHONE_4_0)
+API_AVAILABLE(macos(10.6), ios(4.0))
 DISPATCH_EXPORT
 void *_Nonnull (*_Nullable _dispatch_begin_NSAutoReleasePool)(void);
 
-__OSX_AVAILABLE_STARTING(__MAC_10_6,__IPHONE_4_0)
+API_AVAILABLE(macos(10.6), ios(4.0))
 DISPATCH_EXPORT
 void (*_Nullable _dispatch_end_NSAutoReleasePool)(void *);
 
 #endif /* DISPATCH_COCOA_COMPAT */
+
+API_AVAILABLE(macos(10.13), ios(11.0), tvos(11.0), watchos(4.0))
+DISPATCH_EXPORT DISPATCH_NOTHROW
+void
+_dispatch_poll_for_events_4launchd(void);
 
 __END_DECLS
 

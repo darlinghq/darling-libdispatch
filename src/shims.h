@@ -27,100 +27,36 @@
 #ifndef __DISPATCH_OS_SHIMS__
 #define __DISPATCH_OS_SHIMS__
 
+#if !defined(_WIN32)
 #include <pthread.h>
-#if HAVE_PTHREAD_QOS_H && __has_include(<pthread/qos.h>)
-#include <pthread/qos.h>
-#if __has_include(<pthread/qos_private.h>)
-#include <pthread/qos_private.h>
-#define _DISPATCH_QOS_CLASS_USER_INTERACTIVE QOS_CLASS_USER_INTERACTIVE
-#define _DISPATCH_QOS_CLASS_USER_INITIATED QOS_CLASS_USER_INITIATED
-#define _DISPATCH_QOS_CLASS_DEFAULT QOS_CLASS_DEFAULT
-#define _DISPATCH_QOS_CLASS_UTILITY QOS_CLASS_UTILITY
-#define _DISPATCH_QOS_CLASS_BACKGROUND QOS_CLASS_BACKGROUND
-#define _DISPATCH_QOS_CLASS_UNSPECIFIED QOS_CLASS_UNSPECIFIED
-#else // pthread/qos_private.h
-typedef unsigned long pthread_priority_t;
-#endif // pthread/qos_private.h
-#if __has_include(<sys/qos_private.h>)
-#include <sys/qos_private.h>
-#define _DISPATCH_QOS_CLASS_MAINTENANCE QOS_CLASS_MAINTENANCE
-#else // sys/qos_private.h
-#define _DISPATCH_QOS_CLASS_MAINTENANCE	0x05
-#endif // sys/qos_private.h
-#ifndef _PTHREAD_PRIORITY_OVERCOMMIT_FLAG
-#define _PTHREAD_PRIORITY_OVERCOMMIT_FLAG 0x80000000
-#endif
-#ifndef _PTHREAD_PRIORITY_INHERIT_FLAG
-#define _PTHREAD_PRIORITY_INHERIT_FLAG 0x40000000
-#endif
-#ifndef _PTHREAD_PRIORITY_ROOTQUEUE_FLAG
-#define _PTHREAD_PRIORITY_ROOTQUEUE_FLAG 0x20000000
-#endif
-#ifndef _PTHREAD_PRIORITY_SCHED_PRI_FLAG
-#define _PTHREAD_PRIORITY_SCHED_PRI_FLAG 0x20000000
-#endif
-#ifndef _PTHREAD_PRIORITY_ENFORCE_FLAG
-#define _PTHREAD_PRIORITY_ENFORCE_FLAG 0x10000000
-#endif
-#ifndef _PTHREAD_PRIORITY_OVERRIDE_FLAG
-#define _PTHREAD_PRIORITY_OVERRIDE_FLAG 0x08000000
-#endif
-#ifndef _PTHREAD_PRIORITY_DEFAULTQUEUE_FLAG
-#define _PTHREAD_PRIORITY_DEFAULTQUEUE_FLAG 0x04000000
-#endif
-#ifndef _PTHREAD_PRIORITY_EVENT_MANAGER_FLAG
-#define _PTHREAD_PRIORITY_EVENT_MANAGER_FLAG 0x02000000
-#endif
-#ifndef _PTHREAD_PRIORITY_NEEDS_UNBIND_FLAG
-#define _PTHREAD_PRIORITY_NEEDS_UNBIND_FLAG 0x01000000
-#endif
+#else // defined(_WIN32)
+#include "shims/generic_win_stubs.h"
+#include "shims/generic_sys_queue.h"
+#endif // defined(_WIN32)
 
-#else // HAVE_PTHREAD_QOS_H
-typedef unsigned int qos_class_t;
-typedef unsigned long pthread_priority_t;
-#define QOS_MIN_RELATIVE_PRIORITY (-15)
-#define _PTHREAD_PRIORITY_FLAGS_MASK (~0xffffff)
-#define _PTHREAD_PRIORITY_QOS_CLASS_MASK 0x00ffff00
-#define _PTHREAD_PRIORITY_QOS_CLASS_SHIFT (8ull)
-#define _PTHREAD_PRIORITY_PRIORITY_MASK 0x000000ff
-#define _PTHREAD_PRIORITY_OVERCOMMIT_FLAG 0x80000000
-#define _PTHREAD_PRIORITY_INHERIT_FLAG 0x40000000
-#define _PTHREAD_PRIORITY_ROOTQUEUE_FLAG 0x20000000
-#define _PTHREAD_PRIORITY_ENFORCE_FLAG 0x10000000
-#define _PTHREAD_PRIORITY_OVERRIDE_FLAG 0x08000000
-#define _PTHREAD_PRIORITY_DEFAULTQUEUE_FLAG 0x04000000
-#define _PTHREAD_PRIORITY_EVENT_MANAGER_FLAG 0x02000000
-#define _PTHREAD_PRIORITY_SCHED_PRI_FLAG 0x20000000
-#endif // HAVE_PTHREAD_QOS_H
+#ifdef __ANDROID__
+#include "shims/android_stubs.h"
+#endif // __ANDROID__
 
-#ifdef __linux__
-#include "shims/linux_stubs.h"
+#if !HAVE_MACH
+#include "shims/mach.h"
 #endif
+#include "shims/target.h"
 
-typedef uint32_t dispatch_priority_t;
-#define DISPATCH_SATURATED_OVERRIDE ((dispatch_priority_t)UINT32_MAX)
-
-#ifndef _DISPATCH_QOS_CLASS_USER_INTERACTIVE
-enum {
-	_DISPATCH_QOS_CLASS_USER_INTERACTIVE = 0x21,
-	_DISPATCH_QOS_CLASS_USER_INITIATED = 0x19,
-	_DISPATCH_QOS_CLASS_DEFAULT = 0x15,
-	_DISPATCH_QOS_CLASS_UTILITY = 0x11,
-	_DISPATCH_QOS_CLASS_BACKGROUND = 0x09,
-	_DISPATCH_QOS_CLASS_MAINTENANCE = 0x05,
-	_DISPATCH_QOS_CLASS_UNSPECIFIED = 0x00,
-};
-#endif // _DISPATCH_QOS_CLASS_USER_INTERACTIVE
-#if HAVE_PTHREAD_WORKQUEUES
-#if __has_include(<pthread/workqueue_private.h>)
+#if DISPATCH_USE_INTERNAL_WORKQUEUE
+#include "event/workqueue_internal.h"
+#elif HAVE_PTHREAD_WORKQUEUES
 #include <pthread/workqueue_private.h>
 #else
-#include <pthread_workqueue.h>
+#error Unsupported configuration
 #endif
-#ifndef WORKQ_FEATURE_MAINTENANCE
-#define WORKQ_FEATURE_MAINTENANCE 0x10
+
+#ifndef DISPATCH_WORKQ_MAX_PTHREAD_COUNT
+#define DISPATCH_WORKQ_MAX_PTHREAD_COUNT 255
 #endif
-#endif // HAVE_PTHREAD_WORKQUEUES
+
+#include "shims/hw_config.h"
+#include "shims/priority.h"
 
 #if HAVE_PTHREAD_NP_H
 #include <pthread_np.h>
@@ -134,20 +70,19 @@ enum {
 #define FD_COPY(f, t) (void)(*(t) = *(f))
 #endif
 
-#if TARGET_OS_WIN32
-#define bzero(ptr,len) memset((ptr), 0, (len))
-#define snprintf _snprintf
+#if HAVE_STRLCPY
+#include <string.h>
+#else // that is, if !HAVE_STRLCPY
 
-inline size_t strlcpy(char *dst, const char *src, size_t size) {
-	int res = strlen(dst) + strlen(src) + 1;
-	if (size > 0) {
-		size_t n = size - 1;
-		strncpy(dst, src, n);
-		dst[n] = 0;
-	}
-	return res;
-}
-#endif // TARGET_OS_WIN32
+size_t strlcpy(char *dst, const char *src, size_t size);
+
+#endif // HAVE_STRLCPY
+
+#ifndef TAILQ_FOREACH_SAFE
+#define TAILQ_FOREACH_SAFE(var, head, field, temp)                         \
+	for ((var) = TAILQ_FIRST((head));                                      \
+		(var) && ((temp) = TAILQ_NEXT((var), field), 1); (var) = (temp))
+#endif
 
 #if PTHREAD_WORKQUEUE_SPI_VERSION < 20140716
 static inline int
@@ -207,6 +142,60 @@ _pthread_qos_override_end_direct(mach_port_t thread, void *resource)
 #define _PTHREAD_SET_SELF_WQ_KEVENT_UNBIND 0
 #endif
 
+#if PTHREAD_WORKQUEUE_SPI_VERSION < 20160427
+static inline bool
+_pthread_workqueue_should_narrow(pthread_priority_t priority)
+{
+	(void)priority;
+	return false;
+}
+#endif
+
+#if HAVE_PTHREAD_QOS_H && __has_include(<pthread/qos_private.h>) && \
+		defined(PTHREAD_MAX_PARALLELISM_PHYSICAL) && \
+		DISPATCH_HAVE_HW_CONFIG_COMMPAGE && \
+		DISPATCH_MIN_REQUIRED_OSX_AT_LEAST(101300)
+#define DISPATCH_USE_PTHREAD_QOS_MAX_PARALLELISM 1
+#define DISPATCH_MAX_PARALLELISM_PHYSICAL PTHREAD_MAX_PARALLELISM_PHYSICAL
+#else
+#define DISPATCH_MAX_PARALLELISM_PHYSICAL 0x1
+#endif
+#define DISPATCH_MAX_PARALLELISM_ACTIVE 0x2
+_Static_assert(!(DISPATCH_MAX_PARALLELISM_PHYSICAL &
+		DISPATCH_MAX_PARALLELISM_ACTIVE), "Overlapping parallelism flags");
+
+DISPATCH_ALWAYS_INLINE
+static inline uint32_t
+_dispatch_qos_max_parallelism(dispatch_qos_t qos, unsigned long flags)
+{
+	uint32_t p;
+	int r = 0;
+
+	if (qos) {
+#if DISPATCH_USE_PTHREAD_QOS_MAX_PARALLELISM
+		r = pthread_qos_max_parallelism(_dispatch_qos_to_qos_class(qos),
+				flags & PTHREAD_MAX_PARALLELISM_PHYSICAL);
+#endif
+	}
+	if (likely(r > 0)) {
+		p = (uint32_t)r;
+	} else {
+		p = (flags & DISPATCH_MAX_PARALLELISM_PHYSICAL) ?
+				dispatch_hw_config(physical_cpus) :
+				dispatch_hw_config(logical_cpus);
+	}
+	if (flags & DISPATCH_MAX_PARALLELISM_ACTIVE) {
+		uint32_t active_cpus = dispatch_hw_config(active_cpus);
+		if ((flags & DISPATCH_MAX_PARALLELISM_PHYSICAL) &&
+				active_cpus < dispatch_hw_config(logical_cpus)) {
+			active_cpus /= dispatch_hw_config(logical_cpus) /
+					dispatch_hw_config(physical_cpus);
+		}
+		if (active_cpus < p) p = active_cpus;
+	}
+	return p;
+}
+
 #if !HAVE_NORETURN_BUILTIN_TRAP
 /*
  * XXXRW: Work-around for possible clang bug in which __builtin_trap() is not
@@ -227,12 +216,13 @@ void __builtin_trap(void);
 #ifndef __OS_INTERNAL_ATOMIC__
 #include "shims/atomic.h"
 #endif
+#define DISPATCH_ATOMIC64_ALIGN  __attribute__((aligned(8)))
+
 #include "shims/atomic_sfb.h"
 #include "shims/tsd.h"
 #include "shims/yield.h"
 #include "shims/lock.h"
 
-#include "shims/hw_config.h"
 #include "shims/perfmon.h"
 
 #include "shims/getprogname.h"
@@ -261,7 +251,7 @@ void __builtin_trap(void);
 
 #if __has_feature(c_static_assert)
 #define __dispatch_is_array(x) \
-	_Static_assert(!__builtin_types_compatible_p(typeof((x)[0]) *, typeof(x)), \
+	_Static_assert(!__builtin_types_compatible_p(__typeof__((x)[0]) *, __typeof__(x)), \
 				#x " isn't an array")
 #define countof(x) \
 	({ __dispatch_is_array(x); sizeof(x) / sizeof((x)[0]); })
@@ -286,7 +276,8 @@ _dispatch_mempcpy(void *ptr, const void *data, size_t len)
 #define _dispatch_clear_stack(s) do { \
 		void *a[(s)/sizeof(void*) ? (s)/sizeof(void*) : 1]; \
 		a[0] = pthread_get_stackaddr_np(pthread_self()); \
-		bzero((void*)&a[1], (size_t)(a[0] - (void*)&a[1])); \
+		void* volatile const p = (void*)&a[1]; /* <rdar://32604885> */ \
+		bzero((void*)p, (size_t)(a[0] - (void*)&a[1])); \
 	} while (0)
 #else
 #define _dispatch_clear_stack(s)

@@ -20,8 +20,26 @@
 
 #include "internal.h"
 
+#if defined(__FreeBSD__)
+#include <fcntl.h>
+#define F_RDADVISE F_RDAHEAD
+#endif
+
 #ifndef DISPATCH_IO_DEBUG
 #define DISPATCH_IO_DEBUG DISPATCH_DEBUG
+#endif
+
+#ifndef PAGE_SIZE
+#if defined(_WIN32)
+static DWORD
+getpagesize(void)
+{
+	SYSTEM_INFO siInfo;
+	GetSystemInfo(&siInfo);
+	return siInfo.dwPageSize;
+}
+#endif
+#define PAGE_SIZE ((size_t)getpagesize())
 #endif
 
 #if DISPATCH_DATA_IS_BRIDGED_TO_NSDATA
@@ -110,7 +128,7 @@ enum {
 };
 
 #define _dispatch_io_Block_copy(x) \
-		((typeof(x))_dispatch_Block_copy((dispatch_block_t)(x)))
+		((__typeof__(x))_dispatch_Block_copy((dispatch_block_t)(x)))
 
 #pragma mark -
 #pragma mark dispatch_io_debug
@@ -118,7 +136,7 @@ enum {
 #if DISPATCH_IO_DEBUG
 #if !DISPATCH_DEBUG
 #define _dispatch_io_log(x, ...) do { \
-			_dispatch_log("%llu\t%p\t" x, _dispatch_absolute_time(), \
+			_dispatch_log("%llu\t%p\t" x, _dispatch_uptime(), \
 			(void *)_dispatch_thread_self(), ##__VA_ARGS__); \
 		} while (0)
 #ifdef _dispatch_object_debug
@@ -137,7 +155,7 @@ enum {
 		_dispatch_io_log("fd[0x%x]: " msg, fd, ##__VA_ARGS__)
 #define _dispatch_op_debug(msg, op, ...) \
 		_dispatch_io_log("op[%p]: " msg, op, ##__VA_ARGS__)
-#define _dispatch_channel_debug(msg, channel, ...) \
+#define _dispatch_io_channel_debug(msg, channel, ...) \
 		_dispatch_io_log("channel[%p]: " msg, channel, ##__VA_ARGS__)
 #define _dispatch_fd_entry_debug(msg, fd_entry, ...) \
 		_dispatch_io_log("fd_entry[%p]: " msg, fd_entry, ##__VA_ARGS__)
@@ -147,39 +165,28 @@ enum {
 #pragma mark -
 #pragma mark dispatch_io_hashtables
 
-// Global hashtable of dev_t -> disk_s mappings
-DISPATCH_CACHELINE_ALIGN
-static TAILQ_HEAD(, dispatch_disk_s) _dispatch_io_devs[DIO_HASH_SIZE];
-// Global hashtable of fd -> fd_entry_s mappings
-DISPATCH_CACHELINE_ALIGN
-static TAILQ_HEAD(, dispatch_fd_entry_s) _dispatch_io_fds[DIO_HASH_SIZE];
+LIST_HEAD(dispatch_disk_head_s, dispatch_disk_s);
+LIST_HEAD(dispatch_fd_entry_head_s, dispatch_fd_entry_s);
 
-static dispatch_once_t  _dispatch_io_devs_lockq_pred;
-static dispatch_queue_t _dispatch_io_devs_lockq;
-static dispatch_queue_t _dispatch_io_fds_lockq;
+// Global hashtable of dev_t -> disk_s mappings
+DISPATCH_STATIC_GLOBAL(struct dispatch_disk_head_s _dispatch_io_devs[DIO_HASH_SIZE]);
+DISPATCH_STATIC_GLOBAL(dispatch_queue_t _dispatch_io_devs_lockq);
+
+// Global hashtable of fd -> fd_entry_s mappings
+DISPATCH_STATIC_GLOBAL(struct dispatch_fd_entry_head_s _dispatch_io_fds[DIO_HASH_SIZE]);
+DISPATCH_STATIC_GLOBAL(dispatch_queue_t _dispatch_io_fds_lockq);
+
+DISPATCH_STATIC_GLOBAL(dispatch_once_t _dispatch_io_init_pred);
 
 static char const * const _dispatch_io_key = "io";
 
 static void
-_dispatch_io_fds_lockq_init(void *context DISPATCH_UNUSED)
+_dispatch_io_queues_init(void *context DISPATCH_UNUSED)
 {
 	_dispatch_io_fds_lockq = dispatch_queue_create(
 			"com.apple.libdispatch-io.fd_lockq", NULL);
-	unsigned int i;
-	for (i = 0; i < DIO_HASH_SIZE; i++) {
-		TAILQ_INIT(&_dispatch_io_fds[i]);
-	}
-}
-
-static void
-_dispatch_io_devs_lockq_init(void *context DISPATCH_UNUSED)
-{
 	_dispatch_io_devs_lockq = dispatch_queue_create(
 			"com.apple.libdispatch-io.dev_lockq", NULL);
-	unsigned int i;
-	for (i = 0; i < DIO_HASH_SIZE; i++) {
-		TAILQ_INIT(&_dispatch_io_devs[i]);
-	}
 }
 
 #pragma mark -
@@ -192,17 +199,19 @@ enum {
 	DISPATCH_IOCNTL_MAX_PENDING_IO_REQS,
 };
 
-static struct dispatch_io_defaults_s {
+extern struct dispatch_io_defaults_s {
 	size_t chunk_size, low_water_chunks, max_pending_io_reqs;
 	bool initial_delivery;
-} dispatch_io_defaults = {
+} dispatch_io_defaults;
+
+DISPATCH_GLOBAL_INIT(struct dispatch_io_defaults_s dispatch_io_defaults, {
 	.chunk_size = DIO_MAX_CHUNK_SIZE,
 	.low_water_chunks = DIO_DEFAULT_LOW_WATER_CHUNKS,
 	.max_pending_io_reqs = DIO_MAX_PENDING_IO_REQS,
-};
+});
 
 #define _dispatch_iocntl_set_default(p, v) do { \
-		dispatch_io_defaults.p = (typeof(dispatch_io_defaults.p))(v); \
+		dispatch_io_defaults.p = (__typeof__(dispatch_io_defaults.p))(v); \
 	} while (0)
 
 void
@@ -217,6 +226,7 @@ _dispatch_iocntl(uint32_t param, uint64_t value)
 		break;
 	case DISPATCH_IOCNTL_INITIAL_DELIVERY:
 		_dispatch_iocntl_set_default(initial_delivery, value);
+		break;
 	case DISPATCH_IOCNTL_MAX_PENDING_IO_REQS:
 		_dispatch_iocntl_set_default(max_pending_io_reqs, value);
 		break;
@@ -229,11 +239,10 @@ _dispatch_iocntl(uint32_t param, uint64_t value)
 static dispatch_io_t
 _dispatch_io_create(dispatch_io_type_t type)
 {
-	dispatch_io_t channel = _dispatch_alloc(DISPATCH_VTABLE(io),
+	dispatch_io_t channel = _dispatch_object_alloc(DISPATCH_VTABLE(io),
 			sizeof(struct dispatch_io_s));
 	channel->do_next = DISPATCH_OBJECT_LISTLESS;
-	channel->do_targetq = _dispatch_get_root_queue(_DISPATCH_QOS_CLASS_DEFAULT,
-			true);
+	channel->do_targetq = _dispatch_get_default_queue(true);
 	channel->params.type = type;
 	channel->params.high = SIZE_MAX;
 	channel->params.low = dispatch_io_defaults.low_water_chunks *
@@ -252,7 +261,7 @@ _dispatch_io_init(dispatch_io_t channel, dispatch_fd_entry_t fd_entry,
 		_dispatch_retain(queue);
 		dispatch_async(!err ? fd_entry->close_queue : channel->queue, ^{
 			dispatch_async(queue, ^{
-				_dispatch_channel_debug("cleanup handler invoke: err %d",
+				_dispatch_io_channel_debug("cleanup handler invoke: err %d",
 						channel, err);
 				cleanup_handler(err);
 			});
@@ -275,7 +284,7 @@ _dispatch_io_init(dispatch_io_t channel, dispatch_fd_entry_t fd_entry,
 }
 
 void
-_dispatch_io_dispose(dispatch_io_t channel)
+_dispatch_io_dispose(dispatch_io_t channel, DISPATCH_UNUSED bool *allow_free)
 {
 	_dispatch_object_debug(channel, "%s", __func__);
 	if (channel->fd_entry &&
@@ -346,7 +355,7 @@ dispatch_io_create(dispatch_io_type_t type, dispatch_fd_t fd,
 	}
 	dispatch_io_t channel = _dispatch_io_create(type);
 	channel->fd = fd;
-	_dispatch_channel_debug("create", channel);
+	_dispatch_io_channel_debug("create", channel);
 	channel->fd_actual = fd;
 	dispatch_suspend(channel->queue);
 	_dispatch_retain(queue);
@@ -358,12 +367,23 @@ dispatch_io_create(dispatch_io_type_t type, dispatch_fd_t fd,
 			err = _dispatch_io_validate_type(channel, fd_entry->stat.mode);
 		}
 		if (!err && type == DISPATCH_IO_RANDOM) {
+#if defined(_WIN32)
+			LARGE_INTEGER liPosition;
+			LARGE_INTEGER liDistance = {};
+			if (!SetFilePointerEx((HANDLE)fd_entry->fd, liDistance, &liPosition, FILE_CURRENT)) {
+				err = (int)GetLastError();
+			} else {
+				err = 0;
+				channel->f_ptr = liPosition.QuadPart;
+			}
+#else
 			off_t f_ptr;
 			_dispatch_io_syscall_switch_noerr(err,
 				f_ptr = lseek(fd_entry->fd, 0, SEEK_CUR),
 				case 0: channel->f_ptr = f_ptr; break;
 				default: (void)dispatch_assume_zero(err); break;
 			);
+#endif
 		}
 		channel->err = err;
 		_dispatch_fd_entry_retain(fd_entry);
@@ -402,7 +422,7 @@ dispatch_io_create_with_path(dispatch_io_type_t type, const char *path,
 	}
 	dispatch_io_t channel = _dispatch_io_create(type);
 	channel->fd = -1;
-	_dispatch_channel_debug("create with path %s", channel, path);
+	_dispatch_io_channel_debug("create with path %s", channel, path);
 	channel->fd_actual = -1;
 	path_data->channel = channel;
 	path_data->oflag = oflag;
@@ -415,11 +435,15 @@ dispatch_io_create_with_path(dispatch_io_type_t type, const char *path,
 		int err = 0;
 		struct stat st;
 		_dispatch_io_syscall_switch_noerr(err,
+#if defined(_WIN32)
+			stat(path_data->path, &st),
+#else
 			(path_data->oflag & O_NOFOLLOW) == O_NOFOLLOW
-#ifndef __linux__
+#if __APPLE__
 					|| (path_data->oflag & O_SYMLINK) == O_SYMLINK
 #endif
 					? lstat(path_data->path, &st) : stat(path_data->path, &st),
+#endif
 			case 0:
 				err = _dispatch_io_validate_type(channel, st.st_mode);
 				break;
@@ -454,8 +478,8 @@ dispatch_io_create_with_path(dispatch_io_type_t type, const char *path,
 			return;
 		}
 		dispatch_suspend(channel->queue);
-		dispatch_once_f(&_dispatch_io_devs_lockq_pred, NULL,
-				_dispatch_io_devs_lockq_init);
+		dispatch_once_f(&_dispatch_io_init_pred, NULL,
+				_dispatch_io_queues_init);
 		dispatch_async(_dispatch_io_devs_lockq, ^{
 			dispatch_fd_entry_t fd_entry = _dispatch_fd_entry_create_with_path(
 					path_data, st.st_dev, st.st_mode);
@@ -488,7 +512,7 @@ dispatch_io_create_with_io(dispatch_io_type_t type, dispatch_io_t in_channel,
 		return DISPATCH_BAD_INPUT;
 	}
 	dispatch_io_t channel = _dispatch_io_create(type);
-	_dispatch_channel_debug("create with channel %p", channel, in_channel);
+	_dispatch_io_channel_debug("create with channel %p", channel, in_channel);
 	dispatch_suspend(channel->queue);
 	_dispatch_retain(queue);
 	_dispatch_retain(channel);
@@ -520,12 +544,23 @@ dispatch_io_create_with_io(dispatch_io_type_t type, dispatch_io_t in_channel,
 						in_channel->fd_entry->stat.mode);
 			}
 			if (!err && type == DISPATCH_IO_RANDOM && in_channel->fd != -1) {
+#if defined(_WIN32)
+				LARGE_INTEGER liPosition;
+				LARGE_INTEGER liDistance = {};
+				if (!SetFilePointerEx((HANDLE)in_channel->fd_entry->fd, liDistance, &liPosition, FILE_CURRENT)) {
+					err = (int)GetLastError();
+				} else {
+					err = 0;
+					channel->f_ptr = liPosition.QuadPart;
+				}
+#else
 				off_t f_ptr;
 				_dispatch_io_syscall_switch_noerr(err,
 					f_ptr = lseek(in_channel->fd_entry->fd, 0, SEEK_CUR),
 					case 0: channel->f_ptr = f_ptr; break;
 					default: (void)dispatch_assume_zero(err); break;
 				);
+#endif
 			}
 			channel->err = err;
 			if (err) {
@@ -595,7 +630,7 @@ dispatch_io_set_high_water(dispatch_io_t channel, size_t high_water)
 {
 	_dispatch_retain(channel);
 	dispatch_async(channel->queue, ^{
-		_dispatch_channel_debug("set high water: %zu", channel, high_water);
+		_dispatch_io_channel_debug("set high water: %zu", channel, high_water);
 		if (channel->params.low > high_water) {
 			channel->params.low = high_water;
 		}
@@ -609,7 +644,7 @@ dispatch_io_set_low_water(dispatch_io_t channel, size_t low_water)
 {
 	_dispatch_retain(channel);
 	dispatch_async(channel->queue, ^{
-		_dispatch_channel_debug("set low water: %zu", channel, low_water);
+		_dispatch_io_channel_debug("set low water: %zu", channel, low_water);
 		if (channel->params.high < low_water) {
 			channel->params.high = low_water ? low_water : 1;
 		}
@@ -624,7 +659,8 @@ dispatch_io_set_interval(dispatch_io_t channel, uint64_t interval,
 {
 	_dispatch_retain(channel);
 	dispatch_async(channel->queue, ^{
-		_dispatch_channel_debug("set interval: %llu", channel, interval);
+		_dispatch_io_channel_debug("set interval: %llu", channel,
+		  (unsigned long long)interval);
 		channel->params.interval = interval < INT64_MAX ? interval : INT64_MAX;
 		channel->params.interval_flags = flags;
 		_dispatch_release(channel);
@@ -668,7 +704,7 @@ dispatch_io_get_descriptor(dispatch_io_t channel)
 static void
 _dispatch_io_stop(dispatch_io_t channel)
 {
-	_dispatch_channel_debug("stop", channel);
+	_dispatch_io_channel_debug("stop", channel);
 	(void)os_atomic_or2o(channel, atomic_flags, DIO_STOPPED, relaxed);
 	_dispatch_retain(channel);
 	dispatch_async(channel->queue, ^{
@@ -676,9 +712,12 @@ _dispatch_io_stop(dispatch_io_t channel)
 			_dispatch_object_debug(channel, "%s", __func__);
 			dispatch_fd_entry_t fd_entry = channel->fd_entry;
 			if (fd_entry) {
-				_dispatch_channel_debug("stop cleanup", channel);
+				_dispatch_io_channel_debug("stop cleanup", channel);
 				_dispatch_fd_entry_cleanup_operations(fd_entry, channel);
 				if (!(channel->atomic_flags & DIO_CLOSED)) {
+					if (fd_entry->path_data) {
+						fd_entry->path_data->channel = NULL;
+					}
 					channel->fd_entry = NULL;
 					_dispatch_fd_entry_release(fd_entry);
 				}
@@ -687,11 +726,11 @@ _dispatch_io_stop(dispatch_io_t channel)
 				_dispatch_retain(channel);
 				dispatch_async(_dispatch_io_fds_lockq, ^{
 					_dispatch_object_debug(channel, "%s", __func__);
-					_dispatch_channel_debug("stop cleanup after close",
+					_dispatch_io_channel_debug("stop cleanup after close",
 							channel);
 					dispatch_fd_entry_t fdi;
 					uintptr_t hash = DIO_HASH(channel->fd);
-					TAILQ_FOREACH(fdi, &_dispatch_io_fds[hash], fd_list) {
+					LIST_FOREACH(fdi, &_dispatch_io_fds[hash], fd_list) {
 						if (fdi->fd == channel->fd) {
 							_dispatch_fd_entry_cleanup_operations(fdi, channel);
 							break;
@@ -723,15 +762,16 @@ dispatch_io_close(dispatch_io_t channel, unsigned long flags)
 	dispatch_async(channel->queue, ^{
 		dispatch_async(channel->barrier_queue, ^{
 			_dispatch_object_debug(channel, "%s", __func__);
-			_dispatch_channel_debug("close", channel);
+			_dispatch_io_channel_debug("close", channel);
 			if (!(channel->atomic_flags & (DIO_CLOSED|DIO_STOPPED))) {
 				(void)os_atomic_or2o(channel, atomic_flags, DIO_CLOSED,
 						relaxed);
 				dispatch_fd_entry_t fd_entry = channel->fd_entry;
 				if (fd_entry) {
-					if (!fd_entry->path_data) {
-						channel->fd_entry = NULL;
+					if (fd_entry->path_data) {
+						fd_entry->path_data->channel = NULL;
 					}
+					channel->fd_entry = NULL;
 					_dispatch_fd_entry_release(fd_entry);
 				}
 			}
@@ -885,7 +925,7 @@ dispatch_read(dispatch_fd_t fd, size_t length, dispatch_queue_t queue,
 		dispatch_operation_t op =
 			_dispatch_operation_create(DOP_DIR_READ, channel, 0,
 					length, dispatch_data_empty,
-					_dispatch_get_root_queue(_DISPATCH_QOS_CLASS_DEFAULT,false),
+					_dispatch_get_default_queue(false),
 					^(bool done, dispatch_data_t data, int error) {
 				if (data) {
 					data = dispatch_data_create_concat(deliver_data, data);
@@ -956,7 +996,7 @@ dispatch_write(dispatch_fd_t fd, dispatch_data_t data, dispatch_queue_t queue,
 		dispatch_operation_t op =
 			_dispatch_operation_create(DOP_DIR_WRITE, channel, 0,
 					dispatch_data_get_size(data), data,
-					_dispatch_get_root_queue(_DISPATCH_QOS_CLASS_DEFAULT,false),
+					_dispatch_get_default_queue(false),
 					^(bool done, dispatch_data_t d, int error) {
 				if (done) {
 					if (d) {
@@ -999,6 +1039,7 @@ _dispatch_operation_create(dispatch_op_direction_t direction,
 	if (err || !length) {
 		_dispatch_io_data_retain(data);
 		_dispatch_retain(queue);
+		_dispatch_retain(channel);
 		dispatch_async(channel->barrier_queue, ^{
 			dispatch_async(queue, ^{
 				dispatch_data_t d = data;
@@ -1007,23 +1048,23 @@ _dispatch_operation_create(dispatch_op_direction_t direction,
 				} else if (direction == DOP_DIR_WRITE && !err) {
 					d = NULL;
 				}
-				_dispatch_channel_debug("IO handler invoke: err %d", channel,
+				_dispatch_io_channel_debug("IO handler invoke: err %d", channel,
 						err);
 				handler(true, d, err);
+				_dispatch_release(channel);
 				_dispatch_io_data_release(data);
 			});
 			_dispatch_release(queue);
 		});
 		return NULL;
 	}
-	dispatch_operation_t op = _dispatch_alloc(DISPATCH_VTABLE(operation),
+	dispatch_operation_t op = _dispatch_object_alloc(DISPATCH_VTABLE(operation),
 			sizeof(struct dispatch_operation_s));
-	_dispatch_channel_debug("operation create: %p", channel, op);
+	_dispatch_io_channel_debug("operation create: %p", channel, op);
 	op->do_next = DISPATCH_OBJECT_LISTLESS;
 	op->do_xref_cnt = -1; // operation object is not exposed externally
-	op->op_q = dispatch_queue_create("com.apple.libdispatch-io.opq", NULL);
-	op->op_q->do_targetq = queue;
-	_dispatch_retain(queue);
+	op->op_q = dispatch_queue_create_with_target("com.apple.libdispatch-io.opq",
+			NULL, queue);
 	op->active = false;
 	op->direction = direction;
 	op->offset = offset + channel->f_ptr;
@@ -1035,7 +1076,7 @@ _dispatch_operation_create(dispatch_op_direction_t direction,
 	// Take a snapshot of the priority of the channel queue. The actual I/O
 	// for this operation will be performed at this priority
 	dispatch_queue_t targetq = op->channel->do_targetq;
-	while (fastpath(targetq->do_targetq)) {
+	while (targetq->do_targetq) {
 		targetq = targetq->do_targetq;
 	}
 	op->do_targetq = targetq;
@@ -1044,7 +1085,8 @@ _dispatch_operation_create(dispatch_op_direction_t direction,
 }
 
 void
-_dispatch_operation_dispose(dispatch_operation_t op)
+_dispatch_operation_dispose(dispatch_operation_t op,
+		DISPATCH_UNUSED bool *allow_free)
 {
 	_dispatch_object_debug(op, "%s", __func__);
 	_dispatch_op_debug("dispose", op);
@@ -1062,7 +1104,11 @@ _dispatch_operation_dispose(dispatch_operation_t op)
 	}
 	// For write operations, op->buf is owned by op->buf_data
 	if (op->buf && op->direction == DOP_DIR_READ) {
+#if defined(_WIN32)
+		_aligned_free(op->buf);
+#else
 		free(op->buf);
+#endif
 	}
 	if (op->buf_data) {
 		_dispatch_io_data_release(op->buf_data);
@@ -1151,8 +1197,9 @@ _dispatch_operation_timer(dispatch_queue_t tq, dispatch_operation_t op)
 	}
 	dispatch_source_t timer = dispatch_source_create(
 			DISPATCH_SOURCE_TYPE_TIMER, 0, 0, tq);
-	dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW,
-			(int64_t)op->params.interval), op->params.interval, 0);
+	dispatch_source_set_timer(timer,
+			dispatch_time(DISPATCH_TIME_NOW, (int64_t)op->params.interval),
+			op->params.interval, 0);
 	dispatch_source_set_event_handler(timer, ^{
 		// On stream queue or pick queue
 		if (dispatch_source_testcancel(timer)) {
@@ -1212,13 +1259,15 @@ _dispatch_fd_entry_unguard(dispatch_fd_entry_t fd_entry)
 	);
 }
 #else
+#if !defined(_WIN32)
 static inline void
 _dispatch_fd_entry_guard(dispatch_fd_entry_t fd_entry) { (void)fd_entry; }
+#endif
 static inline void
 _dispatch_fd_entry_unguard(dispatch_fd_entry_t fd_entry) { (void)fd_entry; }
 #endif // DISPATCH_USE_GUARDED_FD
 
-static inline int
+static inline dispatch_fd_t
 _dispatch_fd_entry_guarded_open(dispatch_fd_entry_t fd_entry, const char *path,
 		int oflag, mode_t mode) {
 #if DISPATCH_USE_GUARDED_FD
@@ -1232,23 +1281,46 @@ _dispatch_fd_entry_guarded_open(dispatch_fd_entry_t fd_entry, const char *path,
 		return fd;
 	}
 	errno = 0;
-#endif
-	return open(path, oflag, mode);
+#else
 	(void)fd_entry;
+#endif
+#if defined(_WIN32)
+	(void)mode;
+	DWORD dwDesiredAccess = 0;
+	if (oflag & _O_RDWR)
+		dwDesiredAccess = GENERIC_READ | GENERIC_WRITE;
+	else if (oflag & _O_RDONLY)
+		dwDesiredAccess = GENERIC_READ;
+	else if (oflag & _O_WRONLY)
+		dwDesiredAccess = GENERIC_WRITE;
+	DWORD dwCreationDisposition = OPEN_EXISTING;
+	if (oflag & _O_CREAT)
+		dwCreationDisposition = OPEN_ALWAYS;
+	if (oflag & _O_TRUNC)
+		dwCreationDisposition = CREATE_ALWAYS;
+	return (dispatch_fd_t)CreateFile(path, dwDesiredAccess, 0, NULL, dwCreationDisposition, 0, NULL);
+#else
+	return open(path, oflag, mode);
+#endif
 }
 
 static inline int
-_dispatch_fd_entry_guarded_close(dispatch_fd_entry_t fd_entry, int fd) {
+_dispatch_fd_entry_guarded_close(dispatch_fd_entry_t fd_entry, dispatch_fd_t fd) {
 #if DISPATCH_USE_GUARDED_FD
 	if (fd_entry->guard_flags) {
 		guardid_t guard = (uintptr_t)fd_entry;
 		return guarded_close_np(fd, &guard);
 	} else
+#else
+	(void)fd_entry;
 #endif
 	{
+#if defined(_WIN32)
+		return CloseHandle((HANDLE)fd);
+#else
 		return close(fd);
+#endif
 	}
-	(void)fd_entry;
 }
 
 static inline void
@@ -1265,14 +1337,13 @@ static void
 _dispatch_fd_entry_init_async(dispatch_fd_t fd,
 		dispatch_fd_entry_init_callback_t completion_callback)
 {
-	static dispatch_once_t _dispatch_io_fds_lockq_pred;
-	dispatch_once_f(&_dispatch_io_fds_lockq_pred, NULL,
-			_dispatch_io_fds_lockq_init);
+	dispatch_once_f(&_dispatch_io_init_pred, NULL,
+			_dispatch_io_queues_init);
 	dispatch_async(_dispatch_io_fds_lockq, ^{
 		dispatch_fd_entry_t fd_entry = NULL;
 		// Check to see if there is an existing entry for the given fd
 		uintptr_t hash = DIO_HASH(fd);
-		TAILQ_FOREACH(fd_entry, &_dispatch_io_fds[hash], fd_list) {
+		LIST_FOREACH(fd_entry, &_dispatch_io_fds[hash], fd_list) {
 			if (fd_entry->fd == fd) {
 				// Retain the fd_entry to ensure it cannot go away until the
 				// stat() has completed
@@ -1299,12 +1370,10 @@ _dispatch_fd_entry_create(dispatch_queue_t q)
 {
 	dispatch_fd_entry_t fd_entry;
 	fd_entry = _dispatch_calloc(1ul, sizeof(struct dispatch_fd_entry_s));
-	fd_entry->close_queue = dispatch_queue_create(
-			"com.apple.libdispatch-io.closeq", NULL);
 	// Use target queue to ensure that no concurrent lookups are going on when
 	// the close queue is running
-	fd_entry->close_queue->do_targetq = q;
-	_dispatch_retain(q);
+	fd_entry->close_queue = dispatch_queue_create_with_target(
+			"com.apple.libdispatch-io.closeq", NULL, q);
 	// Suspend the cleanup queue until closing
 	_dispatch_fd_entry_retain(fd_entry);
 	return fd_entry;
@@ -1318,11 +1387,29 @@ _dispatch_fd_entry_create_with_fd(dispatch_fd_t fd, uintptr_t hash)
 			_dispatch_io_fds_lockq);
 	_dispatch_fd_entry_debug("create: fd %d", fd_entry, fd);
 	fd_entry->fd = fd;
-	TAILQ_INSERT_TAIL(&_dispatch_io_fds[hash], fd_entry, fd_list);
+	LIST_INSERT_HEAD(&_dispatch_io_fds[hash], fd_entry, fd_list);
 	fd_entry->barrier_queue = dispatch_queue_create(
 			"com.apple.libdispatch-io.barrierq", NULL);
 	fd_entry->barrier_group = dispatch_group_create();
 	dispatch_async(fd_entry->barrier_queue, ^{
+#if defined(_WIN32)
+		DWORD dwType = GetFileType((HANDLE)fd);
+		if (dwType == FILE_TYPE_PIPE) {
+			unsigned long value = 1;
+			int result = ioctlsocket((SOCKET)fd, (long)FIONBIO, &value);
+			(void)dispatch_assume_zero(result);
+			_dispatch_stream_init(fd_entry,
+				_dispatch_get_root_queue(DISPATCH_QOS_DEFAULT, false));
+		} else {
+			dispatch_suspend(fd_entry->barrier_queue);
+			dispatch_once_f(&_dispatch_io_devs_lockq_pred, NULL,
+					_dispatch_io_devs_lockq_init);
+			dispatch_async(_dispatch_io_devs_lockq, ^{
+				_dispatch_disk_init(fd_entry, 0);
+				dispatch_resume(fd_entry->barrier_queue);
+			});
+		}
+#else
 		_dispatch_fd_entry_debug("stat", fd_entry);
 		int err, orig_flags, orig_nosigpipe = -1;
 		struct stat st;
@@ -1364,12 +1451,12 @@ _dispatch_fd_entry_create_with_fd(dispatch_fd_t fd, uintptr_t hash)
 						break;
 				);
 			}
-			int32_t dev = major(st.st_dev);
+			dev_t dev = (dev_t)major(st.st_dev);
 			// We have to get the disk on the global dev queue. The
 			// barrier queue cannot continue until that is complete
 			dispatch_suspend(fd_entry->barrier_queue);
-			dispatch_once_f(&_dispatch_io_devs_lockq_pred, NULL,
-					_dispatch_io_devs_lockq_init);
+			dispatch_once_f(&_dispatch_io_init_pred, NULL,
+					_dispatch_io_queues_init);
 			dispatch_async(_dispatch_io_devs_lockq, ^{
 				_dispatch_disk_init(fd_entry, dev);
 				dispatch_resume(fd_entry->barrier_queue);
@@ -1384,11 +1471,13 @@ _dispatch_fd_entry_create_with_fd(dispatch_fd_t fd, uintptr_t hash)
 						break;
 				);
 			}
-			_dispatch_stream_init(fd_entry, _dispatch_get_root_queue(
-					_DISPATCH_QOS_CLASS_DEFAULT, false));
+
+			_dispatch_stream_init(fd_entry,
+					_dispatch_get_default_queue(false));
 		}
 		fd_entry->orig_flags = orig_flags;
 		fd_entry->orig_nosigpipe = orig_nosigpipe;
+#endif
 	});
 	// This is the first item run when the close queue is resumed, indicating
 	// that all channels associated with this entry have been closed and that
@@ -1407,7 +1496,7 @@ _dispatch_fd_entry_create_with_fd(dispatch_fd_t fd, uintptr_t hash)
 			});
 		}
 		// Remove this entry from the global fd list
-		TAILQ_REMOVE(&_dispatch_io_fds[hash], fd_entry, fd_list);
+		LIST_REMOVE(fd_entry, fd_list);
 	});
 	// If there was a source associated with this stream, disposing of the
 	// source cancels it and suspends the close queue. Freeing the fd_entry
@@ -1419,6 +1508,7 @@ _dispatch_fd_entry_create_with_fd(dispatch_fd_t fd, uintptr_t hash)
 		dispatch_release(fd_entry->barrier_queue);
 		_dispatch_fd_entry_debug("barrier group release", fd_entry);
 		dispatch_release(fd_entry->barrier_group);
+#if !defined(_WIN32)
 		if (fd_entry->orig_flags != -1) {
 			_dispatch_io_syscall(
 				fcntl(fd, F_SETFL, fd_entry->orig_flags)
@@ -1430,6 +1520,7 @@ _dispatch_fd_entry_create_with_fd(dispatch_fd_t fd, uintptr_t hash)
 				fcntl(fd, F_SETNOSIGPIPE, fd_entry->orig_nosigpipe)
 			);
 		}
+#endif
 #endif
 		_dispatch_fd_entry_unguard(fd_entry);
 		if (fd_entry->convenience_channel) {
@@ -1450,10 +1541,14 @@ _dispatch_fd_entry_create_with_path(dispatch_io_path_data_t path_data,
 			path_data->channel->queue);
 	_dispatch_fd_entry_debug("create: path %s", fd_entry, path_data->path);
 	if (S_ISREG(mode)) {
-		_dispatch_disk_init(fd_entry, major(dev));
+#if defined(_WIN32)
+		_dispatch_disk_init(fd_entry, 0);
+#else
+		_dispatch_disk_init(fd_entry, (dev_t)major(dev));
+#endif
 	} else {
-		_dispatch_stream_init(fd_entry, _dispatch_get_root_queue(
-				_DISPATCH_QOS_CLASS_DEFAULT, false));
+			_dispatch_stream_init(fd_entry,
+					_dispatch_get_default_queue(false));
 	}
 	fd_entry->fd = -1;
 	fd_entry->orig_flags = -1;
@@ -1505,7 +1600,7 @@ _dispatch_fd_entry_open(dispatch_fd_entry_t fd_entry, dispatch_io_t channel)
 	if (fd_entry->err) {
 		return fd_entry->err;
 	}
-	int fd = -1;
+	dispatch_fd_t fd = -1;
 	int oflag = fd_entry->disk ? fd_entry->path_data->oflag & ~O_NONBLOCK :
 			fd_entry->path_data->oflag | O_NONBLOCK;
 open:
@@ -1577,11 +1672,9 @@ _dispatch_stream_init(dispatch_fd_entry_t fd_entry, dispatch_queue_t tq)
 	for (direction = 0; direction < DOP_DIR_MAX; direction++) {
 		dispatch_stream_t stream;
 		stream = _dispatch_calloc(1ul, sizeof(struct dispatch_stream_s));
-		stream->dq = dispatch_queue_create("com.apple.libdispatch-io.streamq",
-				NULL);
+		stream->dq = dispatch_queue_create_with_target(
+				"com.apple.libdispatch-io.streamq", NULL, tq);
 		dispatch_set_context(stream->dq, stream);
-		_dispatch_retain(tq);
-		stream->dq->do_targetq = tq;
 		TAILQ_INIT(&stream->operations[DISPATCH_IO_RANDOM]);
 		TAILQ_INIT(&stream->operations[DISPATCH_IO_STREAM]);
 		fd_entry->streams[direction] = stream;
@@ -1618,7 +1711,7 @@ _dispatch_disk_init(dispatch_fd_entry_t fd_entry, dev_t dev)
 	dispatch_disk_t disk;
 	// Check to see if there is an existing entry for the given device
 	uintptr_t hash = DIO_HASH(dev);
-	TAILQ_FOREACH(disk, &_dispatch_io_devs[hash], disk_list) {
+	LIST_FOREACH(disk, &_dispatch_io_devs[hash], disk_list) {
 		if (disk->dev == dev) {
 			_dispatch_retain(disk);
 			goto out;
@@ -1626,14 +1719,13 @@ _dispatch_disk_init(dispatch_fd_entry_t fd_entry, dev_t dev)
 	}
 	// Otherwise create a new entry
 	size_t pending_reqs_depth = dispatch_io_defaults.max_pending_io_reqs;
-	disk = _dispatch_alloc(DISPATCH_VTABLE(disk),
+	disk = _dispatch_object_alloc(DISPATCH_VTABLE(disk),
 			sizeof(struct dispatch_disk_s) +
 			(pending_reqs_depth * sizeof(dispatch_operation_t)));
 	disk->do_next = DISPATCH_OBJECT_LISTLESS;
 	disk->do_xref_cnt = -1;
 	disk->advise_list_depth = pending_reqs_depth;
-	disk->do_targetq = _dispatch_get_root_queue(_DISPATCH_QOS_CLASS_DEFAULT,
-			false);
+	disk->do_targetq = _dispatch_get_default_queue(false);
 	disk->dev = dev;
 	TAILQ_INIT(&disk->operations);
 	disk->cur_rq = TAILQ_FIRST(&disk->operations);
@@ -1641,20 +1733,19 @@ _dispatch_disk_init(dispatch_fd_entry_t fd_entry, dev_t dev)
 	snprintf(label, sizeof(label), "com.apple.libdispatch-io.deviceq.%d",
 			(int)dev);
 	disk->pick_queue = dispatch_queue_create(label, NULL);
-	TAILQ_INSERT_TAIL(&_dispatch_io_devs[hash], disk, disk_list);
+	LIST_INSERT_HEAD(&_dispatch_io_devs[hash], disk, disk_list);
 out:
 	fd_entry->disk = disk;
 	TAILQ_INIT(&fd_entry->stream_ops);
 }
 
 void
-_dispatch_disk_dispose(dispatch_disk_t disk)
+_dispatch_disk_dispose(dispatch_disk_t disk, DISPATCH_UNUSED bool *allow_free)
 {
-	uintptr_t hash = DIO_HASH(disk->dev);
-	TAILQ_REMOVE(&_dispatch_io_devs[hash], disk, disk_list);
+	LIST_REMOVE(disk, disk_list);
 	dispatch_assert(TAILQ_EMPTY(&disk->operations));
 	size_t i;
-	for (i=0; i<disk->advise_list_depth; ++i) {
+	for (i = 0; i < disk->advise_list_depth; ++i) {
 		dispatch_assert(!disk->advise_list[i]);
 	}
 	dispatch_release(disk->pick_queue);
@@ -1817,7 +1908,7 @@ _dispatch_stream_cleanup_operations(dispatch_stream_t stream,
 {
 	// On stream queue
 	dispatch_operation_t op, tmp;
-	typeof(*stream->operations) *operations;
+	__typeof__(*stream->operations) *operations;
 	operations = &stream->operations[DISPATCH_IO_RANDOM];
 	TAILQ_FOREACH_SAFE(op, operations, operation_list, tmp) {
 		if (!channel || op->channel == channel) {
@@ -1893,7 +1984,7 @@ _dispatch_stream_source(dispatch_stream_t stream, dispatch_operation_t op)
 	// Close queue must not run user cleanup handlers until sources are fully
 	// unregistered
 	dispatch_queue_t close_queue = op->fd_entry->close_queue;
-	dispatch_source_set_cancel_handler(source, ^{
+	dispatch_source_set_mandatory_cancel_handler(source, ^{
 		_dispatch_op_debug("stream source cancel", op);
 		dispatch_resume(close_queue);
 	});
@@ -2086,7 +2177,7 @@ _dispatch_disk_perform(void *ctxt)
 	op = disk->advise_list[disk->req_idx];
 	int result = _dispatch_operation_perform(op);
 	disk->advise_list[disk->req_idx] = NULL;
-	disk->req_idx = (++disk->req_idx)%disk->advise_list_depth;
+	disk->req_idx = (disk->req_idx + 1) % disk->advise_list_depth;
 	_dispatch_op_debug("async perform completion: disk %p", op, disk);
 	dispatch_async(disk->pick_queue, ^{
 		_dispatch_op_debug("perform completion", op);
@@ -2131,8 +2222,12 @@ static void
 _dispatch_operation_advise(dispatch_operation_t op, size_t chunk_size)
 {
 	_dispatch_op_debug("advise", op);
+#if defined(_WIN32)
+	(void)op;
+	(void)chunk_size;
+#else
 	if (_dispatch_io_get_error(op, NULL, true)) return;
-#ifdef __linux__
+#if defined(__linux__) || defined(__FreeBSD__)
 	// linux does not support fcntl (F_RDAVISE)
 	// define necessary datastructure and use readahead
 	struct radvisory {
@@ -2159,9 +2254,9 @@ _dispatch_operation_advise(dispatch_operation_t op, size_t chunk_size)
 	}
 	advise.ra_offset = op->advise_offset;
 	op->advise_offset += advise.ra_count;
-#ifdef __linux__
+#if defined(__linux__)
 	_dispatch_io_syscall_switch(err,
-		readahead(op->fd_entry->fd, advise.ra_offset, advise.ra_count),
+			readahead(op->fd_entry->fd, advise.ra_offset, (size_t)advise.ra_count),
 		case EINVAL: break; // fd does refer to a non-supported filetype
 		default: (void)dispatch_assume_zero(err); break;
 	);
@@ -2173,6 +2268,7 @@ _dispatch_operation_advise(dispatch_operation_t op, size_t chunk_size)
 		// TODO: set disk status on error
 		default: (void)dispatch_assume_zero(err); break;
 	);
+#endif
 #endif
 }
 
@@ -2207,7 +2303,17 @@ _dispatch_operation_perform(dispatch_operation_t op)
 			} else {
 				op->buf_siz = max_buf_siz;
 			}
+#if defined(_WIN32)
+			static bool bQueried = false;
+			static SYSTEM_INFO siInfo;
+			if (!bQueried) {
+				GetNativeSystemInfo(&siInfo);
+				bQueried = true;
+			}
+			op->buf = _aligned_malloc(op->buf_siz, siInfo.dwPageSize);
+#else
 			op->buf = valloc(op->buf_siz);
+#endif
 			_dispatch_op_debug("buffer allocated", op);
 		} else if (op->direction == DOP_DIR_WRITE) {
 			// Always write the first data piece, if that is smaller than a
@@ -2245,20 +2351,51 @@ _dispatch_operation_perform(dispatch_operation_t op)
 	}
 	void *buf = op->buf + op->buf_len;
 	size_t len = op->buf_siz - op->buf_len;
+#if defined(_WIN32)
+	assert(len <= UINT_MAX && "overflow for read/write");
+	LONGLONG off = (LONGLONG)((size_t)op->offset + op->total);
+#else
 	off_t off = (off_t)((size_t)op->offset + op->total);
+#endif
+#if defined(_WIN32)
+	long processed = -1;
+#else
 	ssize_t processed = -1;
+#endif
 syscall:
 	if (op->direction == DOP_DIR_READ) {
 		if (op->params.type == DISPATCH_IO_STREAM) {
+#if defined(_WIN32)
+			ReadFile((HANDLE)op->fd_entry->fd, buf, (DWORD)len, (LPDWORD)&processed, NULL);
+#else
 			processed = read(op->fd_entry->fd, buf, len);
+#endif
 		} else if (op->params.type == DISPATCH_IO_RANDOM) {
+#if defined(_WIN32)
+			OVERLAPPED ovlOverlapped = {};
+			ovlOverlapped.Offset = off & 0xffffffff;
+			ovlOverlapped.OffsetHigh = (off >> 32) & 0xffffffff;
+			ReadFile((HANDLE)op->fd_entry->fd, buf, (DWORD)len, (LPDWORD)&processed, &ovlOverlapped);
+#else
 			processed = pread(op->fd_entry->fd, buf, len, off);
+#endif
 		}
 	} else if (op->direction == DOP_DIR_WRITE) {
 		if (op->params.type == DISPATCH_IO_STREAM) {
+#if defined(_WIN32)
+			WriteFile((HANDLE)op->fd_entry->fd, buf, (DWORD)len, (LPDWORD)&processed, NULL);
+#else
 			processed = write(op->fd_entry->fd, buf, len);
+#endif
 		} else if (op->params.type == DISPATCH_IO_RANDOM) {
+#if defined(_WIN32)
+			OVERLAPPED ovlOverlapped = {};
+			ovlOverlapped.Offset = off & 0xffffffff;
+			ovlOverlapped.OffsetHigh = (off >> 32) & 0xffffffff;
+			WriteFile((HANDLE)op->fd_entry->fd, buf, (DWORD)len, (LPDWORD)&processed, &ovlOverlapped);
+#else
 			processed = pwrite(op->fd_entry->fd, buf, len, off);
+#endif
 		}
 	}
 	// Encountered an error on the file descriptor
@@ -2284,10 +2421,10 @@ syscall:
 		return DISPATCH_OP_DELIVER;
 	}
 error:
-	if (err == EAGAIN) {
+	if (err == EAGAIN || err == EWOULDBLOCK) {
 		// For disk based files with blocking I/O we should never get EAGAIN
 		dispatch_assert(!op->fd_entry->disk);
-		_dispatch_op_debug("performed: EAGAIN", op);
+		_dispatch_op_debug("performed: EAGAIN/EWOULDBLOCK", op);
 		if (op->direction == DOP_DIR_READ && op->total &&
 				op->channel == op->fd_entry->convenience_channel) {
 			// Convenience read with available data completes on EAGAIN
@@ -2417,6 +2554,7 @@ _dispatch_operation_deliver_data(dispatch_operation_t op,
 #pragma mark -
 #pragma mark dispatch_io_debug
 
+DISPATCH_COLD
 static size_t
 _dispatch_io_debug_attr(dispatch_io_t channel, char* buf, size_t bufsiz)
 {
@@ -2440,7 +2578,7 @@ _dispatch_io_debug(dispatch_io_t channel, char* buf, size_t bufsiz)
 {
 	size_t offset = 0;
 	offset += dsnprintf(&buf[offset], bufsiz - offset, "%s[%p] = { ",
-			dx_kind(channel), channel);
+			_dispatch_object_class_name(channel), channel);
 	offset += _dispatch_object_debug_attr(channel, &buf[offset],
 			bufsiz - offset);
 	offset += _dispatch_io_debug_attr(channel, &buf[offset], bufsiz - offset);
@@ -2448,6 +2586,7 @@ _dispatch_io_debug(dispatch_io_t channel, char* buf, size_t bufsiz)
 	return offset;
 }
 
+DISPATCH_COLD
 static size_t
 _dispatch_operation_debug_attr(dispatch_operation_t op, char* buf,
 		size_t bufsiz)
@@ -2475,7 +2614,7 @@ _dispatch_operation_debug(dispatch_operation_t op, char* buf, size_t bufsiz)
 {
 	size_t offset = 0;
 	offset += dsnprintf(&buf[offset], bufsiz - offset, "%s[%p] = { ",
-			dx_kind(op), op);
+			_dispatch_object_class_name(op), op);
 	offset += _dispatch_object_debug_attr(op, &buf[offset], bufsiz - offset);
 	offset += _dispatch_operation_debug_attr(op, &buf[offset], bufsiz - offset);
 	offset += dsnprintf(&buf[offset], bufsiz - offset, "}");

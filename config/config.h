@@ -5,9 +5,17 @@
    you don't. */
 #define HAVE_DECL_CLOCK_MONOTONIC 0
 
+/* Define to 1 if you have the declaration of `CLOCK_REALTIME', and to 0 if
+   you don't. */
+#define CLOCK_REALTIME 0
+
 /* Define to 1 if you have the declaration of `CLOCK_UPTIME', and to 0 if you
    don't. */
 #define HAVE_DECL_CLOCK_UPTIME 0
+
+/* Define to 1 if you have the declaration of `HAVE_DECL_CLOCK_UPTIME_FAST',
+    and to 0 if you don't. */
+#define HAVE_DECL_CLOCK_UPTIME_FAST 0
 
 /* Define to 1 if you have the declaration of `FD_COPY', and to 0 if you
    don't. */
@@ -57,6 +65,14 @@
  you don't. */
 #define HAVE_DECL_VQ_QUOTA 1
 
+/* Define to 1 if you have the declaration of `VQ_NEARLOWDISK', and to 0 if
+   you don't. */
+#define HAVE_DECL_VQ_NEARLOWDISK 1
+
+/* Define to 1 if you have the declaration of `VQ_DESIRED_DISK', and to 0 if
+ you don't. */
+#define HAVE_DECL_VQ_DESIRED_DISK 1
+
 /* Define to 1 if you have the <dlfcn.h> header file. */
 #define HAVE_DLFCN_H 1
 
@@ -87,8 +103,8 @@
 /* Define to 1 if you have the `mach_absolute_time' function. */
 #define HAVE_MACH_ABSOLUTE_TIME 1
 
-/* Define to 1 if you have the `mach_port_construct' function. */
-#define HAVE_MACH_PORT_CONSTRUCT 0
+/* Define to 1 if you have the `mach_approximate_time' function. */
+#define HAVE_MACH_APPROXIMATE_TIME 1
 
 /* Define to 1 if you have the `malloc_create_zone' function. */
 #define HAVE_MALLOC_CREATE_ZONE 1
@@ -109,7 +125,7 @@
 #define HAVE_PTHREAD_KEY_INIT_NP 1
 
 /* Define to 1 if you have the <pthread_machdep.h> header file. */
-/* #define HAVE_PTHREAD_MACHDEP_H 1 */
+#define HAVE_PTHREAD_MACHDEP_H 1
 
 /* Define to 1 if you have the `pthread_main_np' function. */
 #define HAVE_PTHREAD_MAIN_NP 1
@@ -128,9 +144,6 @@
 
 /* Define to 1 if you have the <pthread/workqueue_private.h> header file. */
 #define HAVE_PTHREAD_WORKQUEUE_PRIVATE_H 1
-
-/* Define to 1 if you have the `pthread_workqueue_setdispatch_np' function. */
-#define HAVE_PTHREAD_WORKQUEUE_SETDISPATCH_NP 1
 
 /* Define to 1 if you have the <stdint.h> header file. */
 #define HAVE_STDINT_H 1
@@ -244,3 +257,5 @@
 
 /* Define if using Darwin $NOCANCEL */
 #define __DARWIN_NON_CANCELABLE 1
+
+#define HAVE_STRLCPY 1
