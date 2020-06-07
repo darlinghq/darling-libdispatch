@@ -2078,7 +2078,12 @@ _dispatch_set_basepri(dispatch_priority_t dq_dbp)
 	_dispatch_thread_setspecific(dispatch_basepri_key, (void*)(uintptr_t)dbp);
 	return old_dbp;
 #else
+#ifdef DARLING
+	// again, like i said in "queue_internal.h": does Apple try compiling their code?
+	(void)dq_dbp;
+#else
 	(void)dbp;
+#endif // DARLING
 	return 0;
 #endif
 }

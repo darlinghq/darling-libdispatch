@@ -8,18 +8,14 @@ enable_language(C CXX)
 
 add_definitions(-Dtypeof=__typeof__ -ggdb -O0)
 add_definitions(-DPRIVATE -DDISPATCH_USE_DTRACE=0 -DNeXT_RUNTIME=1 -DNS_RETURNS_INNER_POINTER=
+	-DDISPATCH_USE_INTERNAL_WORKQUEUE=0
 	-DDISPATCH_USE_KEVENT_WORKQUEUE=0
-	-DDISPATCH_USE_KEVENT_QOS=0
-	-DHAVE_PTHREAD_WORKQUEUE_QOS=0
-	-DDISPATCH_USE_MEMORYSTATUS=1
-	-DUSE_APPLE_TSD_OPTIMIZATIONS=1
-	-DHAVE_PTHREAD_KEY_INIT_NP=1
-	-DDISPATCH_USE_VM_PRESSURE=0
+	-DDISPATCH_USE_KEVENT_WORKLOOP=0
 	-DVOUCHER_USE_MACH_VOUCHER=0
 )
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -nostdinc -D__DARWIN_UNIX03 -fPIC -mmacosx-version-min=10.12")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-exceptions -std=c++11 -fPIC -mmacosx-version-min=10.12 -nostdinc -D_Bool=bool")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -nostdinc -D__DARWIN_UNIX03 -fPIC")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-exceptions -std=c++11 -fPIC -nostdinc -D_Bool=bool")
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/private)
@@ -36,12 +32,13 @@ set(dispatch_SRCS
 	src/apply.c
 	src/benchmark.c
 	src/data.c
-	src/datam.m
+	src/data.m
 	src/init.c
 	src/introspection.c
 	src/io.c
+	src/mach.c
 	src/object.c
-	src/objectm.m
+	src/object.m
 	src/once.c
 	src/queue.c
 	src/semaphore.c
@@ -50,12 +47,19 @@ set(dispatch_SRCS
 	src/transform.c
 	src/voucher.c
 	src/block.cpp
+	src/shims.c
+	src/event/event.c
+	src/event/event_epoll.c
+	src/event/event_kevent.c
+	src/event/event_windows.c
 	src/shims/lock.c
-	#src/firehose/firehose_buffer.c
 	${CMAKE_CURRENT_BINARY_DIR}/src/protocolServer.c
 	${CMAKE_CURRENT_BINARY_DIR}/src/protocolUser.c
-	#${CMAKE_CURRENT_BINARY_DIR}/src/firehose/firehoseUser.c
-	#${CMAKE_CURRENT_BINARY_DIR}/src/firehose/firehose_replyServer.c
+)
+
+set_source_files_properties(src/object.m
+	PROPERTIES
+		COMPILE_FLAGS "-Wno-return-type"
 )
 
 set(DYLIB_INSTALL_NAME "/usr/lib/system/libdispatch.dylib")
