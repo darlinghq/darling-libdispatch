@@ -409,6 +409,8 @@ DISPATCH_CLASS_IMPL(io)
 DISPATCH_CLASS_IMPL(operation)
 DISPATCH_CLASS_IMPL(disk)
 
+// Darling-only conditional; the upstream sources don't have this conditional (but they should)
+#if VOUCHER_USE_MACH_VOUCHER
 OS_OBJECT_NONLAZY_CLASS
 @implementation OS_OBJECT_CLASS(voucher)
 OS_OBJECT_NONLAZY_CLASS_LOAD
@@ -438,6 +440,7 @@ DISPATCH_UNAVAILABLE_INIT()
 }
 
 @end
+#endif // VOUCHER_USE_MACH_VOUCHER
 
 #if VOUCHER_ENABLE_RECIPE_OBJECTS
 OS_OBJECT_NONLAZY_CLASS

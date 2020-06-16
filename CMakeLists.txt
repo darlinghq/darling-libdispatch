@@ -11,6 +11,7 @@ add_definitions(-DPRIVATE -DDISPATCH_USE_DTRACE=0 -DNeXT_RUNTIME=1 -DNS_RETURNS_
 	-DDISPATCH_USE_INTERNAL_WORKQUEUE=0
 	-DDISPATCH_USE_KEVENT_WORKQUEUE=0
 	-DDISPATCH_USE_KEVENT_WORKLOOP=0
+	-DHAVE_PTHREAD_WORKQUEUE_QOS=0
 	-DVOUCHER_USE_MACH_VOUCHER=0
 )
 
@@ -53,6 +54,7 @@ set(dispatch_SRCS
 	src/event/event_kevent.c
 	src/event/event_windows.c
 	src/shims/lock.c
+	src/shims/yield.c
 	${CMAKE_CURRENT_BINARY_DIR}/src/protocolServer.c
 	${CMAKE_CURRENT_BINARY_DIR}/src/protocolUser.c
 )
