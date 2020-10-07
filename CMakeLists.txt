@@ -13,6 +13,8 @@ add_definitions(-DPRIVATE -DDISPATCH_USE_DTRACE=0 -DNeXT_RUNTIME=1 -DNS_RETURNS_
 	-DDISPATCH_USE_KEVENT_WORKLOOP=0
 	-DHAVE_PTHREAD_WORKQUEUE_QOS=0
 	-DVOUCHER_USE_MACH_VOUCHER=0
+	-DDISPATCH_DEBUG=1
+	-DDISPATCH_USE_MEMORYSTATUS=0
 )
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -nostdinc -D__DARWIN_UNIX03 -fPIC")
@@ -83,6 +85,8 @@ add_circular(libdispatch_shared FAT
 	UPWARD
 		objc
 	LINK_FLAGS "-Wl,-order_file,${CMAKE_CURRENT_SOURCE_DIR}/xcodeconfig/libdispatch.order -Wl,-alias_list,${CMAKE_CURRENT_SOURCE_DIR}/xcodeconfig/libdispatch.aliases"
+	DEPENDENCIES
+		libdebug
 )
 
 set_target_properties(libdispatch_shared PROPERTIES OUTPUT_NAME "dispatch")

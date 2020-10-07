@@ -147,8 +147,8 @@ dispatch_source_get_handle(dispatch_source_t ds)
 unsigned long
 dispatch_source_get_data(dispatch_source_t ds)
 {
-#if DISPATCH_USE_MEMORYSTATUS
 	dispatch_source_refs_t dr = ds->ds_refs;
+#if DISPATCH_USE_MEMORYSTATUS
 	if (dr->du_vmpressure_override) {
 		return NOTE_VM_PRESSURE;
 	}
@@ -934,11 +934,20 @@ _dispatch_source_invoke(dispatch_source_t ds, dispatch_invoke_context_t dic,
 #if DISPATCH_EVENT_BACKEND_KEVENT
 	if (flags & DISPATCH_INVOKE_WORKLOOP_DRAIN) {
 		dispatch_workloop_t dwl = (dispatch_workloop_t)_dispatch_get_wlh();
+#ifdef DARLING
+		// HACK: this is almost certainly wrong, but i don't see why WLH_ANON is being returned
+		if (dwl == DISPATCH_WLH_ANON) {
+			_dispatch_event_loop_drain_anon_timers();
+		} else {
+#endif
 		dispatch_timer_heap_t dth = dwl->dwl_timer_heap;
 		if (dth && dth[0].dth_dirty_bits) {
 			_dispatch_event_loop_drain_timers(dwl->dwl_timer_heap,
 					DISPATCH_TIMER_WLH_COUNT);
 		}
+#ifdef DARLING
+		}
+#endif
 	}
 #endif // DISPATCH_EVENT_BACKEND_KEVENT
 }
