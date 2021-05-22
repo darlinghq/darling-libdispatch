@@ -92,3 +92,6 @@ add_darling_static_library(libdispatch_static SOURCES $<TARGET_OBJECTS:libdispat
 
 install(TARGETS libdispatch_shared DESTINATION libexec/darling/usr/lib/system)
 
+if(ENABLE_TESTS)
+	add_subdirectory(tests)
+endif()
