@@ -382,12 +382,15 @@ DISPATCH_OBJECT_USES_XREF_DISPOSE()
 
 @end
 
-#define DISPATCH_CLASS_IMPL(name) \
+#define EMPTY_OS_OBJECT_CLASS_IMPL(name) \
 		OS_OBJECT_NONLAZY_CLASS \
-		@implementation DISPATCH_CLASS(name) \
+		@implementation name \
 		OS_OBJECT_NONLAZY_CLASS_LOAD \
 		DISPATCH_UNAVAILABLE_INIT() \
 		@end
+
+#define DISPATCH_CLASS_IMPL(name) \
+		EMPTY_OS_OBJECT_CLASS_IMPL(DISPATCH_CLASS(name))
 
 #if !DISPATCH_DATA_IS_BRIDGED_TO_NSDATA
 DISPATCH_CLASS_IMPL(data)
@@ -409,8 +412,67 @@ DISPATCH_CLASS_IMPL(io)
 DISPATCH_CLASS_IMPL(operation)
 DISPATCH_CLASS_IMPL(disk)
 
-// Darling-only conditional; the upstream sources don't have this conditional (but they should)
-#if VOUCHER_USE_MACH_VOUCHER
+#pragma mark os_workgroups
+
+@implementation OS_OBJECT_CLASS(os_workgroup)
+DISPATCH_UNAVAILABLE_INIT()
+OS_OBJECT_USES_XREF_DISPOSE()
+
+- (void)_xref_dispose {
+	_os_workgroup_xref_dispose(self);
+	[super _xref_dispose];
+}
+
+- (void) dealloc {
+	_os_workgroup_dispose(self);
+	[super dealloc];
+}
+
+- (NSString *) debugDescription {
+	Class nsstring = objc_lookUpClass("NSString");
+	if (!nsstring) return nil;
+	char buf[2048];
+
+	os_workgroup_t wg = (os_workgroup_t) self;
+	_os_workgroup_debug(wg, buf, sizeof(buf));
+
+	return [nsstring stringWithUTF8String:buf];
+}
+@end
+
+@implementation OS_OBJECT_CLASS(os_workgroup_interval)
+DISPATCH_UNAVAILABLE_INIT()
+
+- (void) _xref_dispose {
+	_os_workgroup_interval_xref_dispose(self);
+	[super _xref_dispose];
+}
+
+- (void) dealloc {
+	_os_workgroup_interval_dispose(self);
+	[super dealloc];
+}
+@end
+
+@implementation OS_OBJECT_CLASS(os_workgroup_parallel)
+DISPATCH_UNAVAILABLE_INIT()
+@end
+
+#pragma mark eventlink
+
+@implementation OS_OBJECT_CLASS(os_eventlink)
+DISPATCH_UNAVAILABLE_INIT()
+
+- (void) dealloc {
+	_os_eventlink_dispose(self);
+	[super dealloc];
+}
+
+@end
+
+
+#pragma mark vouchers
+
 OS_OBJECT_NONLAZY_CLASS
 @implementation OS_OBJECT_CLASS(voucher)
 OS_OBJECT_NONLAZY_CLASS_LOAD
@@ -440,7 +502,6 @@ DISPATCH_UNAVAILABLE_INIT()
 }
 
 @end
-#endif // VOUCHER_USE_MACH_VOUCHER
 
 #if VOUCHER_ENABLE_RECIPE_OBJECTS
 OS_OBJECT_NONLAZY_CLASS

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2011 Apple Inc. All rights reserved.
+ * Copyright (c) 2020 Apple Inc. All rights reserved.
  *
  * @APPLE_APACHE_LICENSE_HEADER_START@
  *
@@ -18,27 +18,20 @@
  * @APPLE_APACHE_LICENSE_HEADER_END@
  */
 
-#include <stdlib.h>
+#ifndef __OS_WORKGROUP__
+#define __OS_WORKGROUP__
 
-#include <bsdtests.h>
-#include "dispatch_test.h"
+#ifndef __DISPATCH_BUILDING_DISPATCH__
+#ifndef __OS_WORKGROUP_INDIRECT__
+#define __OS_WORKGROUP_INDIRECT__
+#endif /* __OS_WORKGROUP_INDIRECT__ */
 
-static void
-work(void *context __attribute__((unused)))
-{
-	test_stop();
-	exit(0);
-}
+#include <os/workgroup_base.h>
+#include <os/workgroup_object.h>
+#include <os/workgroup_interval.h>
+#include <os/workgroup_parallel.h>
 
-int
-main(void)
-{
-	dispatch_queue_t q;
-	dispatch_test_start("Dispatch (Public) API");
-	q = dispatch_get_main_queue();
-	test_ptr_notnull("dispatch_get_main_queue", q);
+#undef __OS_WORKGROUP_INDIRECT__
+#endif /* __DISPATCH_BUILDING_DISPATCH__ */
 
-	dispatch_async_f(dispatch_get_main_queue(), NULL, work);
-	dispatch_main();
-	return 0;
-}
+#endif /* __OS_WORKGROUP__ */

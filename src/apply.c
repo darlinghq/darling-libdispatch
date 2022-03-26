@@ -267,14 +267,26 @@ DISPATCH_ALWAYS_INLINE
 static inline dispatch_queue_global_t
 _dispatch_apply_root_queue(dispatch_queue_t dq)
 {
+	dispatch_queue_t tq = NULL;
+
 	if (dq) {
 		while (unlikely(dq->do_targetq)) {
-			dq = dq->do_targetq;
+			tq = dq->do_targetq;
+
+			// If the current root is a custom pri workloop, select it. We have
+			// to this check here because custom pri workloops have a fake
+			// bottom targetq.
+			if (_dispatch_is_custom_pri_workloop(dq)) {
+				return upcast(dq)._dgq;
+			}
+
+			dq = tq;
 		}
-		// if the current root queue is a pthread root queue, select it
-		if (!_dispatch_is_in_root_queues_array(dq)) {
-			return upcast(dq)._dgq;
-		}
+	}
+
+	// if the current root queue is a pthread root queue, select it
+	if (dq && !_dispatch_is_in_root_queues_array(dq)) {
+		return upcast(dq)._dgq;
 	}
 
 	pthread_priority_t pp = _dispatch_get_priority();
@@ -334,16 +346,32 @@ dispatch_apply_f(size_t iterations, dispatch_queue_t _dq, void *ctxt,
 	da->da_thr_cnt = thr_cnt;
 #if DISPATCH_INTROSPECTION
 	da->da_dc = _dispatch_continuation_alloc();
-	*da->da_dc = dc;
+	da->da_dc->dc_func = (void *) dc.dc_func;
+	da->da_dc->dc_ctxt = dc.dc_ctxt;
+	da->da_dc->dc_data = dc.dc_data;
+
 	da->da_dc->dc_flags = DC_FLAG_ALLOCATED;
 #else
 	da->da_dc = &dc;
 #endif
 	da->da_flags = 0;
 
+	if (unlikely(_dispatch_is_custom_pri_workloop(dq))) {
+		uint64_t dq_state = os_atomic_load(&dq->dq_state, relaxed);
+
+		if (_dq_state_drain_locked_by_self(dq_state)) {
+			// We're already draining on the custom priority workloop, don't go
+			// wide, just call inline serially
+			return _dispatch_apply_serial(da);
+		} else {
+			return dispatch_async_and_wait_f(dq, da, _dispatch_apply_serial);
+		}
+	}
+
 	if (unlikely(dq->dq_width == 1 || thr_cnt <= 1)) {
 		return dispatch_sync_f(dq, da, _dispatch_apply_serial);
 	}
+
 	if (unlikely(dq->do_targetq)) {
 		if (unlikely(dq == old_dq)) {
 			return dispatch_sync_f(dq, da, _dispatch_apply_serial);
