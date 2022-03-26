@@ -65,7 +65,7 @@
 #elif TARGET_OS_MAC && !TARGET_OS_IPHONE
 #  if __MAC_OS_X_VERSION_MIN_REQUIRED < __MAC_10_8
 #  define OS_OBJECT_HAVE_OBJC_SUPPORT 0
-#  elif defined(__i386__) && __MAC_OS_X_VERSION_MIN_REQUIRED < __MAC_10_12
+#  elif defined(__i386__) && __MAC_OS_X_VERSION_MIN_REQUIRED < __MAC_10_12 && !defined(DARLING)
 #  define OS_OBJECT_HAVE_OBJC_SUPPORT 0
 #  else
 #  define OS_OBJECT_HAVE_OBJC_SUPPORT 1

@@ -1978,9 +1978,17 @@ DISPATCH_ALWAYS_INLINE DISPATCH_CONST
 static inline dispatch_queue_global_t
 _dispatch_get_root_queue(dispatch_qos_t qos, bool overcommit)
 {
+#ifdef DARLING
+	if (qos == 0) {
+		// !!! HACK !!!
+		// treat QoS `0` as the manager queue
+		return &_dispatch_mgr_root_queue;
+	}
+#else
 	if (unlikely(qos < DISPATCH_QOS_MIN || qos > DISPATCH_QOS_MAX)) {
 		DISPATCH_CLIENT_CRASH(qos, "Corrupted priority");
 	}
+#endif
 	return &_dispatch_root_queues[2 * (qos - 1) + overcommit];
 }
 

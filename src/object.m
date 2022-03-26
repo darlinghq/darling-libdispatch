@@ -471,6 +471,8 @@ DISPATCH_UNAVAILABLE_INIT()
 @end
 
 
+// Darling-only conditional; the upstream sources don't have this conditional (but they should)
+#if defined(DARLING) && VOUCHER_USE_MACH_VOUCHER
 #pragma mark vouchers
 
 OS_OBJECT_NONLAZY_CLASS
@@ -502,6 +504,7 @@ DISPATCH_UNAVAILABLE_INIT()
 }
 
 @end
+#endif // defined(DARLING) && VOUCHER_USE_MACH_VOUCHER
 
 #if VOUCHER_ENABLE_RECIPE_OBJECTS
 OS_OBJECT_NONLAZY_CLASS

@@ -457,6 +457,19 @@ typedef struct dispatch_queue_specific_head_s {
 	TAILQ_HEAD(, dispatch_queue_specific_s) dqsh_entries;
 } *dispatch_queue_specific_head_t;
 
+#ifdef DARLING
+// for Darling, we move this up here because otherwise it's an undefined type when it's used in `dispatch_workloop_attr_s`
+//
+// it really makes me wonder: does Apple even try compiling their own code? because i don't know any C compiler
+// that accepts a type being used before it's `typedef`ed
+typedef struct dispatch_pthread_root_queue_observer_hooks_s {
+	void (*queue_will_execute)(dispatch_queue_t queue);
+	void (*queue_did_execute)(dispatch_queue_t queue);
+} dispatch_pthread_root_queue_observer_hooks_s;
+typedef dispatch_pthread_root_queue_observer_hooks_s
+		*dispatch_pthread_root_queue_observer_hooks_t;
+#endif // DARLING
+
 #define DISPATCH_WORKLOOP_ATTR_HAS_SCHED      0x0001u
 #define DISPATCH_WORKLOOP_ATTR_HAS_POLICY     0x0002u
 #define DISPATCH_WORKLOOP_ATTR_HAS_CPUPERCENT 0x0004u
@@ -651,12 +664,14 @@ struct dispatch_queue_global_s {
 } DISPATCH_CACHELINE_ALIGN;
 
 
+#ifndef DARLING
 typedef struct dispatch_pthread_root_queue_observer_hooks_s {
 	void (*queue_will_execute)(dispatch_queue_t queue);
 	void (*queue_did_execute)(dispatch_queue_t queue);
 } dispatch_pthread_root_queue_observer_hooks_s;
 typedef dispatch_pthread_root_queue_observer_hooks_s
 		*dispatch_pthread_root_queue_observer_hooks_t;
+#endif // DARLING
 
 #ifdef __APPLE__
 #define DISPATCH_IOHID_SPI 1

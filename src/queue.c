@@ -7774,10 +7774,12 @@ _dispatch_root_queues_init_once(void *context DISPATCH_UNUSED)
 	int wq_supported = _pthread_workqueue_supported();
 	int r = ENOTSUP;
 
+#ifndef DARLING
 	if (!(wq_supported & WORKQ_FEATURE_MAINTENANCE)) {
 		DISPATCH_INTERNAL_CRASH(wq_supported,
 				"QoS Maintenance support required");
 	}
+#endif
 
 #if DISPATCH_USE_KEVENT_SETUP
 	struct pthread_workqueue_config cfg = {
