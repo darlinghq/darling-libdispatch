@@ -3,6 +3,18 @@
 #include <os/assumes.h>
 #include <mach/mach_port.h>
 
+#ifdef DARLING
+work_interval_instance_t work_interval_instance_alloc(work_interval_t wi);
+void work_interval_instance_clear(work_interval_instance_t wii);
+int work_interval_instance_finish(work_interval_instance_t wii);
+void work_interval_instance_free(work_interval_instance_t wii);
+void work_interval_instance_set_deadline(work_interval_instance_t wii, uint64_t deadline);
+void work_interval_instance_set_finish(work_interval_instance_t wii, uint64_t current_finish);
+void work_interval_instance_set_start(work_interval_instance_t wii, uint64_t start);
+int work_interval_instance_start(work_interval_instance_t wii);
+int work_interval_instance_update(work_interval_instance_t wii);
+#endif
+
 /* Declares struct symbols */
 OS_OBJECT_CLASS_DECL(os_workgroup);
 #if !USE_OBJC

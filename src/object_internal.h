@@ -27,6 +27,12 @@
 #ifndef __DISPATCH_OBJECT_INTERNAL__
 #define __DISPATCH_OBJECT_INTERNAL__
 
+#ifdef DARLING
+#include <objc/objc.h>
+#include <os/atomic_private.h>
+#include <dispatch/private.h>
+#endif
+
 #if !OS_OBJECT_USE_OBJC
 #define OS_OBJECT_DECL(name)  DISPATCH_DECL(name)
 #define OS_OBJECT_DECL_SUBCLASS(name, super)  DISPATCH_DECL(name)

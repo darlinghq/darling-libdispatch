@@ -19,6 +19,9 @@
  */
 
 #include "internal.h"
+#ifdef DARLING
+#include <dispatch/private.h>
+#endif
 
 #if USE_OBJC
 

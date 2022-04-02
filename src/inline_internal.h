@@ -32,6 +32,11 @@
 #include <dispatch/base.h> // for HeaderDoc
 #endif
 
+#ifdef DARLING
+#include <objc/objc.h>
+#include <os/atomic_private.h>
+#endif
+
 #if DISPATCH_USE_CLIENT_CALLOUT
 
 DISPATCH_NOTHROW void

@@ -19,6 +19,9 @@
  */
 
 #include "internal.h"
+#ifdef DARLING
+#include <dispatch/private.h>
+#endif
 #if HAVE_MACH
 #include "protocol.h" // _dispatch_send_wakeup_runloop_thread
 #endif
