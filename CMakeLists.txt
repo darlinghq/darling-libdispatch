@@ -7,13 +7,14 @@ endif(COMMAND cmake_policy)
 enable_language(C CXX)
 
 add_definitions(-Dtypeof=__typeof__ -ggdb -O0)
-add_definitions(-DPRIVATE -DDISPATCH_USE_DTRACE=0 -DNeXT_RUNTIME=1 -DNS_RETURNS_INNER_POINTER=
+add_definitions(-DPRIVATE -D__BLOCKS__ -DDISPATCH_USE_DTRACE=0 -DNeXT_RUNTIME=1 -DNS_RETURNS_INNER_POINTER=
 	-DDISPATCH_USE_INTERNAL_WORKQUEUE=0
 	-DDISPATCH_USE_KEVENT_WORKQUEUE=0
 	-DDISPATCH_USE_KEVENT_WORKLOOP=0
 	-DHAVE_PTHREAD_WORKQUEUE_QOS=0
 	-DVOUCHER_USE_MACH_VOUCHER=0
 	-DDISPATCH_USE_WORKQUEUE_NARROWING=0
+	-DOS_ATOMIC_CONFIG_MEMORY_ORDER_DEPENDENCY=1
 )
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -nostdinc -D__DARWIN_UNIX03 -fPIC")
@@ -30,11 +31,24 @@ mig(src/firehose/firehose.defs)
 mig(src/firehose/firehose_reply.defs)
 
 set(dispatch_SRCS
+	resolver/resolver.c
 	src/allocator.c
 	src/apply.c
 	src/benchmark.c
+	src/block.cpp
+	src/BlocksRuntime/data.c
+	src/BlocksRuntime/runtime.c
 	src/data.c
 	src/data.m
+	src/event/event.c
+	src/event/event_epoll.c
+	src/event/event_kevent.c
+	src/event/event_windows.c
+	src/eventlink.c
+	src/event/workqueue.c
+	# src/firehose/firehose_buffer.c
+	# src/firehose/firehose_server.c
+	# src/firehose/firehose_server_object.m
 	src/init.c
 	src/introspection.c
 	src/io.c
@@ -44,18 +58,16 @@ set(dispatch_SRCS
 	src/once.c
 	src/queue.c
 	src/semaphore.c
+	src/shims.c
+	# src/shims/generic_win_stubs.c
+	# src/shims/getprogname.c
+	src/shims/lock.c
+	src/shims/yield.c
 	src/source.c
 	src/time.c
 	src/transform.c
 	src/voucher.c
-	src/block.cpp
-	src/shims.c
-	src/event/event.c
-	src/event/event_epoll.c
-	src/event/event_kevent.c
-	src/event/event_windows.c
-	src/shims/lock.c
-	src/shims/yield.c
+	src/workgroup.c
 	${CMAKE_CURRENT_BINARY_DIR}/src/protocolServer.c
 	${CMAKE_CURRENT_BINARY_DIR}/src/protocolUser.c
 )
