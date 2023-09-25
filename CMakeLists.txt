@@ -36,8 +36,6 @@ set(dispatch_SRCS
 	src/apply.c
 	src/benchmark.c
 	src/block.cpp
-	src/BlocksRuntime/data.c
-	src/BlocksRuntime/runtime.c
 	src/data.c
 	src/data.m
 	src/event/event.c
