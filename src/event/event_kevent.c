@@ -389,7 +389,8 @@ _dispatch_kevent_print_error(dispatch_kevent_t ke)
 		// the udata already, and it is unsafe to dereference it now.
 	} else if (_dispatch_kevent_unote_is_muxed(ke)) {
 		ke->flags |= _dispatch_kevent_get_muxnote(ke)->dmn_kev.flags;
-	} else if (ke->udata) {
+	} else if (ke->udata && ke->filter != EVFILT_TIMER) {
+		/* Timer udata points to the timer heap, not a dispatch unote. */
 		du = (dispatch_unote_class_t)(uintptr_t)ke->udata;
 		if (!_dispatch_unote_registered(du)) {
 			ke->flags |= EV_ADD;
