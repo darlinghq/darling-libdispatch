@@ -4372,7 +4372,15 @@ _dispatch_workloop_invoke(dispatch_workloop_t dwl,
 		dispatch_invoke_context_t dic, dispatch_invoke_flags_t flags)
 {
 	flags &= ~(dispatch_invoke_flags_t)DISPATCH_INVOKE_REDIRECTING_DRAIN;
+#ifdef DARLING
+	// Darling can fall back to delivering a workloop on an anonymous worker.
+	// Only advertise kernel workloop ownership when the matching WLH is set.
+	if (_dispatch_get_wlh() == (dispatch_wlh_t)dwl) {
+		flags |= DISPATCH_INVOKE_WORKLOOP_DRAIN;
+	}
+#else
 	flags |= DISPATCH_INVOKE_WORKLOOP_DRAIN;
+#endif
 	_dispatch_queue_class_invoke(dwl, dic, flags, 0, _dispatch_workloop_invoke2);
 }
 
