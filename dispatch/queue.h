@@ -132,6 +132,10 @@ DISPATCH_DECL_SUBCLASS(dispatch_queue_global, dispatch_queue);
 typedef struct dispatch_lane_s *dispatch_queue_serial_t;
 #else
 DISPATCH_DECL_SUBCLASS(dispatch_queue_serial, dispatch_queue);
+
+/* DARLING: from the macOS 14 SDK. Swift binaries built against it import
+ * (extension in Dispatch):OS_dispatch_queue_serial_executor.asUnownedSerialExecutor(). */
+DISPATCH_DECL_SUBCLASS(dispatch_queue_serial_executor, dispatch_queue);
 #endif
 
 /*!
