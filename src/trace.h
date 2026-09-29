@@ -111,6 +111,10 @@ _dispatch_trace_client_callout2(void *ctxt, size_t i, void (*f)(void *, size_t))
 						DS_EVENT_HANDLER], relaxed); \
 				_func = _dc ? _dc->dc_func : NULL; \
 				_ctxt = _dc ? _dc->dc_ctxt : NULL; \
+			} else if (dx_type(_do) == _DISPATCH_SWIFT_JOB_TYPE) { \
+				dispatch_swift_continuation_t _job = (void *)_do; \
+				_func = (dispatch_function_t)dx_vtable(_job)->do_invoke; \
+				_ctxt = _job; \
 			} else { \
 				_func = (dispatch_function_t)_dispatch_lane_invoke; \
 				_ctxt = _do->do_ctxt; \

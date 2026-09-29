@@ -299,7 +299,8 @@ _dispatch_introspection_object_get_info(dispatch_object_t dou)
 {
 	dispatch_introspection_object_s dio = {
 		.object = dou._dc,
-		.target_queue = dou._do->do_targetq,
+		.target_queue = dx_type(dou._do) == _DISPATCH_SWIFT_JOB_TYPE ?
+				NULL : dou._do->do_targetq,
 		.type = (void*)dou._do->do_vtable,
 		.kind = _dispatch_object_class_name(dou._do),
 	};
