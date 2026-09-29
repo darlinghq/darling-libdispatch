@@ -1078,6 +1078,29 @@ typedef struct dispatch_continuation_s {
 dispatch_assert_aliases(dispatch_continuation_s, dispatch_object_s, do_next);
 dispatch_assert_aliases(dispatch_continuation_s, dispatch_object_s, do_vtable);
 
+/* Swift jobs have a shorter vtable than ordinary dispatch objects. Do not
+ * access their callback through dispatch_queue_s or dispatch_object_s. */
+struct dispatch_swift_continuation_s;
+struct dispatch_swift_continuation_extra_vtable_s {
+	unsigned long const do_type;
+	void DISPATCH_VTABLE_ENTRY(do_invoke)(struct dispatch_swift_continuation_s *,
+			void *, uint32_t);
+};
+
+struct dispatch_swift_continuation_vtable_s {
+	_OS_OBJECT_CLASS_HEADER();
+	struct dispatch_swift_continuation_extra_vtable_s _os_obj_vtable;
+};
+
+typedef struct dispatch_swift_continuation_s {
+	DISPATCH_OBJECT_HEADER(swift_continuation);
+} *dispatch_swift_continuation_t;
+
+dispatch_assert_aliases(dispatch_swift_continuation_s, dispatch_object_s, do_next);
+dispatch_assert_aliases(dispatch_swift_continuation_s, dispatch_object_s, do_vtable);
+dispatch_static_assert(sizeof(struct dispatch_swift_continuation_s) ==
+		sizeof(struct dispatch_object_s));
+
 typedef struct dispatch_sync_context_s {
 	struct dispatch_continuation_s _as_dc[0];
 	DISPATCH_CONTINUATION_HEADER(continuation);
