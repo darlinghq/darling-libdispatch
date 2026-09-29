@@ -4770,7 +4770,7 @@ _dispatch_queue_override_invoke(dispatch_continuation_t dc,
 	}
 	_dispatch_continuation_pop_forwarded(dc, dc_flags, assumed_rq, {
 		if (_dispatch_object_has_vtable(dou._do)) {
-			dx_invoke(dou._dq, dic, flags);
+			_dispatch_object_invoke_typed(dou, dic, flags);
 		} else {
 			_dispatch_continuation_invoke_inline(dou, flags, assumed_rq);
 		}

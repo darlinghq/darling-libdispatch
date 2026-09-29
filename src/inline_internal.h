@@ -2597,6 +2597,21 @@ _dispatch_continuation_invoke_inline(dispatch_object_t dou,
 	_dispatch_perfmon_workitem_inc();
 }
 
+DISPATCH_ALWAYS_INLINE
+static inline void
+_dispatch_object_invoke_typed(dispatch_object_t dou,
+		dispatch_invoke_context_t dic, dispatch_invoke_flags_t flags)
+{
+	if (dx_type(dou._do) == _DISPATCH_SWIFT_JOB_TYPE) {
+		dispatch_swift_continuation_t job = (void *)dou._do;
+		/* This runtime has no cooperative pool. Ordinary dispatch flags and
+		 * invocation contexts are not part of the Swift job callback ABI. */
+		dx_invoke(job, NULL, 0);
+	} else {
+		dx_invoke(dou._dq, dic, flags);
+	}
+}
+
 DISPATCH_ALWAYS_INLINE_NDEBUG
 static inline void
 _dispatch_continuation_pop_inline(dispatch_object_t dou,
@@ -2608,7 +2623,7 @@ _dispatch_continuation_pop_inline(dispatch_object_t dou,
 	if (observer_hooks) observer_hooks->queue_will_execute(dqu._dq);
 	flags &= _DISPATCH_INVOKE_PROPAGATE_MASK;
 	if (_dispatch_object_has_vtable(dou)) {
-		dx_invoke(dou._dq, dic, flags);
+		_dispatch_object_invoke_typed(dou, dic, flags);
 	} else {
 		_dispatch_continuation_invoke_inline(dou, flags, dqu);
 	}
