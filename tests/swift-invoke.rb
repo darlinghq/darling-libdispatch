@@ -8,6 +8,8 @@ queues = File.read("#{root}/src/queue_internal.h")
 helper = inline[/static inline void\n_dispatch_object_invoke_typed\(.*?\n\}/m]
 vtable = queues[/struct dispatch_swift_continuation_s;.*?(?=typedef struct dispatch_swift_continuation_s)/m]
 ordinary = objects.scan(/^#define DISPATCH_OBJECT_VTABLE_HEADER\(x\).*?(?=^#)/m).first
+enqueue = File.read("#{root}/src/queue.c")[/void\ndispatch_async_swift_job\(.*?\n\}/m]
+abort 'missing enqueue implementation' unless enqueue
 abort 'missing implementation' unless helper && vtable && ordinary
 type = objects[/_DISPATCH_SWIFT_JOB_TYPE\s*=\s*(0x[0-9a-f]+)/, 1]
 semaphore = objects[/_DISPATCH_SEMAPHORE_TYPE\s*=\s*(0x[0-9a-f]+)/, 1]
@@ -26,6 +28,7 @@ code = <<~C
   _Static_assert(_DISPATCH_SWIFT_JOB_TYPE == 1 && #{semaphore} != 1, "type collision");
   #{vtable}
   struct dispatch_swift_continuation_s {
+    struct regular_s *_as_do[0];
     const struct dispatch_swift_continuation_vtable_s *do_vtable;
   };
   typedef struct dispatch_swift_continuation_s *dispatch_swift_continuation_t;
@@ -41,6 +44,20 @@ code = <<~C
   #define dx_type(x) dx_vtable(x)->do_type
   #define dx_invoke(x,y,z) dx_vtable(x)->do_invoke(x,y,z)
   #{helper}
+  typedef void *dispatch_queue_t;
+  typedef unsigned dispatch_qos_class_t;
+  #define unlikely(x) (x)
+  #define DISPATCH_CLIENT_CRASH(type, message) abort()
+  static unsigned converted, pushed;
+  static void *pushed_object, *pushed_queue;
+  static unsigned _dispatch_qos_from_qos_class(unsigned qos) {
+    converted = qos; return qos + 100;
+  }
+  static void capture_push(void *queue, void *object, unsigned qos) {
+    pushed_queue = queue; pushed_object = object; pushed = qos;
+  }
+  #define dx_push(q,j,p) capture_push(q,j,p)
+  #{enqueue}
   static unsigned swift_calls, regular_calls;
   static void swift_call(struct dispatch_swift_continuation_s *job, void *ctx, uint32_t flags) {
     assert(job && ctx == NULL && flags == 0); ++swift_calls;
@@ -55,7 +72,13 @@ code = <<~C
     /* Exact heap allocation makes an ordinary-vtable overread observable. */
     void *metadata = malloc(sizeof template); assert(metadata);
     memcpy(metadata, &template, sizeof template);
-    struct dispatch_swift_continuation_s job = {metadata};
+    struct dispatch_swift_continuation_s job = {.do_vtable=metadata};
+    const unsigned priorities[] = {0, 9, 17, 21, 25, 33};
+    for (unsigned i = 0; i < sizeof priorities / sizeof priorities[0]; ++i) {
+      dispatch_async_swift_job(&job, &job, priorities[i]);
+      assert(converted == priorities[i] && pushed == priorities[i] + 100);
+      assert(pushed_object == &job && pushed_queue == &job);
+    }
     _dispatch_object_invoke_typed((dispatch_object_t){._do=(void *)&job}, &job, 0xffffffff);
     const struct regular_vtable regular_metadata = {
       ._os_obj_vtable = { .do_type = #{semaphore}, .do_invoke = regular_call }
@@ -75,4 +98,4 @@ Dir.mktmpdir('swift-invoke') do |dir|
   output, status = Open3.capture2e("#{dir}/test")
   abort output unless status.success?
 end
-puts 'PASS: typed Swift callback and preserved ordinary context/flags; controlled host objects only'
+puts 'PASS: typed callbacks and enqueue QoS forwarding; controlled host objects and queue adapter only'

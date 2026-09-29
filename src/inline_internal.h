@@ -98,6 +98,7 @@ DISPATCH_ALWAYS_INLINE
 static inline const char *
 _dispatch_object_class_name(dispatch_object_t dou)
 {
+	if (dx_type(dou._do) == _DISPATCH_SWIFT_JOB_TYPE) return "swift_job";
 #if USE_OBJC
 	return object_getClassName((id)dou._do) + strlen("OS_dispatch_");
 #else
@@ -132,7 +133,9 @@ DISPATCH_ALWAYS_INLINE
 static inline bool
 _dispatch_object_is_queue(dispatch_object_t dou)
 {
-	return _dispatch_object_has_vtable(dou) && dx_vtable(dou._dq)->dq_push;
+	return _dispatch_object_has_vtable(dou) &&
+			dx_type(dou._do) != _DISPATCH_SWIFT_JOB_TYPE &&
+			dx_vtable(dou._dq)->dq_push;
 }
 
 DISPATCH_ALWAYS_INLINE
