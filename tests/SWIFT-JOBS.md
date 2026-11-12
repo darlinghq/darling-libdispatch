@@ -1,11 +1,6 @@
 # Swift job regression probes
 
-`ruby tests/swift-invoke.rb` runs on a Linux host with Ruby and Clang. It
-extracts the implementation helpers and checks them with ASan/UBSan: the short
-Swift vtable, ordinary invocation, QoS forwarding, invalid object rejection,
-and introspection. Its queue adapter is controlled, not a real dispatch queue.
-
-The C probes are standalone Darwin executables to compile with Darling's
+These probes are standalone Darwin executables to compile with Darling's
 SDK and run inside Darling with the rebuilt libdispatch:
 
 * `dispatch-swift-queue.c`: 128 ABI-shaped jobs on a suspended serial queue,

@@ -105,6 +105,20 @@ DISPATCH_DECL_SUBCLASS(dispatch_queue_global, dispatch_queue);
 #endif
 
 /*!
+ * @typedef dispatch_queue_serial_executor_t
+ *
+ * @abstract
+ * The common superclass of the queues that run their workitems one at a time:
+ * serial queues and workloops. Swift uses it as the type that adopts the
+ * SerialExecutor protocol, so that these queues can be used as task executors.
+ */
+#if defined(__DISPATCH_BUILDING_DISPATCH__) && !defined(__OBJC__)
+typedef struct dispatch_lane_s *dispatch_queue_serial_executor_t;
+#else
+DISPATCH_DECL_SUBCLASS(dispatch_queue_serial_executor, dispatch_queue);
+#endif
+
+/*!
  * @typedef dispatch_queue_serial_t
  *
  * @abstract
@@ -131,11 +145,7 @@ DISPATCH_DECL_SUBCLASS(dispatch_queue_global, dispatch_queue);
 #if defined(__DISPATCH_BUILDING_DISPATCH__) && !defined(__OBJC__)
 typedef struct dispatch_lane_s *dispatch_queue_serial_t;
 #else
-DISPATCH_DECL_SUBCLASS(dispatch_queue_serial, dispatch_queue);
-
-/* DARLING: from the macOS 14 SDK. Swift binaries built against it import
- * (extension in Dispatch):OS_dispatch_queue_serial_executor.asUnownedSerialExecutor(). */
-DISPATCH_DECL_SUBCLASS(dispatch_queue_serial_executor, dispatch_queue);
+DISPATCH_DECL_SUBCLASS(dispatch_queue_serial, dispatch_queue_serial_executor);
 #endif
 
 /*!
