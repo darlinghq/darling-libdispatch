@@ -380,11 +380,12 @@ DISPATCH_OPTIONS(dispatch_object_flags, unsigned long,
 
 	_DISPATCH_OBJECT_CLUSTER        = 0x00000000, // dispatch object cluster
 	_DISPATCH_CONTINUATION_TYPE		= 0x00000000, // meta-type for continuations
-	_DISPATCH_SEMAPHORE_TYPE		= 0x00000001, // meta-type for semaphores
-	_DISPATCH_NODE_TYPE				= 0x00000002, // meta-type for data node
-	_DISPATCH_IO_TYPE				= 0x00000003, // meta-type for io channels
-	_DISPATCH_OPERATION_TYPE		= 0x00000004, // meta-type for io operations
-	_DISPATCH_DISK_TYPE				= 0x00000005, // meta-type for io disks
+	_DISPATCH_SWIFT_JOB_TYPE		= 0x00000001, // Swift runtime ABI
+	_DISPATCH_SEMAPHORE_TYPE		= 0x00000002, // meta-type for semaphores
+	_DISPATCH_NODE_TYPE				= 0x00000003, // meta-type for data node
+	_DISPATCH_IO_TYPE				= 0x00000004, // meta-type for io channels
+	_DISPATCH_OPERATION_TYPE		= 0x00000005, // meta-type for operations
+	_DISPATCH_DISK_TYPE				= 0x00000006, // meta-type for io disks
 
 	_DISPATCH_QUEUE_CLUSTER         = 0x00000010, // dispatch queue cluster
 	_DISPATCH_LANE_TYPE				= 0x00000011, // meta-type for lanes

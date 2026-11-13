@@ -36,6 +36,12 @@ DISPATCH_ASSUME_NONNULL_BEGIN
 
 __BEGIN_DECLS
 
+/* Swift runtime SPI. The enqueuer owns the job for the duration of its
+ * asynchronous execution and may enqueue it on only one queue at a time. */
+DISPATCH_EXPORT DISPATCH_NONNULL1 DISPATCH_NONNULL2
+void dispatch_async_swift_job(dispatch_queue_t queue, void *job,
+		dispatch_qos_class_t qos_class);
+
 /*!
  * @enum dispatch_queue_flags_t
  *

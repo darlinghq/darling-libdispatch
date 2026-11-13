@@ -60,7 +60,7 @@ __BEGIN_DECLS
 #if defined(__DISPATCH_BUILDING_DISPATCH__) && !defined(__OBJC__)
 typedef struct dispatch_workloop_s *dispatch_workloop_t;
 #else
-DISPATCH_DECL_SUBCLASS(dispatch_workloop, dispatch_queue);
+DISPATCH_DECL_SUBCLASS(dispatch_workloop, dispatch_queue_serial_executor);
 #endif
 
 /*!

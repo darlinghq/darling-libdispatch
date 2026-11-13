@@ -880,6 +880,18 @@ dispatch_async_f(dispatch_queue_t dq, void *ctxt, dispatch_function_t func)
 	_dispatch_async_f(dq, ctxt, func, 0);
 }
 
+void
+dispatch_async_swift_job(dispatch_queue_t dq, void *object,
+		dispatch_qos_class_t qos_class)
+{
+	dispatch_swift_continuation_t job = object;
+	unsigned long type = dx_type(job);
+	if (unlikely(type != _DISPATCH_SWIFT_JOB_TYPE)) {
+		DISPATCH_CLIENT_CRASH(type, "Swift job enqueue requires a Swift runtime job");
+	}
+	dx_push(dq, job->_as_do, _dispatch_qos_from_qos_class(qos_class));
+}
+
 DISPATCH_NOINLINE
 void
 dispatch_async_enforce_qos_class_f(dispatch_queue_t dq, void *ctxt,
@@ -4770,7 +4782,7 @@ _dispatch_queue_override_invoke(dispatch_continuation_t dc,
 	}
 	_dispatch_continuation_pop_forwarded(dc, dc_flags, assumed_rq, {
 		if (_dispatch_object_has_vtable(dou._do)) {
-			dx_invoke(dou._dq, dic, flags);
+			_dispatch_object_invoke_typed(dou, dic, flags);
 		} else {
 			_dispatch_continuation_invoke_inline(dou, flags, assumed_rq);
 		}
