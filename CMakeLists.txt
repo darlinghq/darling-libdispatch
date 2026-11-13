@@ -62,6 +62,7 @@ set(dispatch_SRCS
 	src/shims/lock.c
 	src/shims/yield.c
 	src/source.c
+	src/swift_concurrency.c
 	src/time.c
 	src/transform.c
 	src/voucher.c
