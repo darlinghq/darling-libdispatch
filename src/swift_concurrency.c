@@ -97,3 +97,25 @@ dispatch_lock_override_end(qos_class_t override_to_end)
 #endif // HAVE_PTHREAD_WORKQUEUE_QOS
 	return 0;
 }
+
+bool
+dispatch_verify_current_queue_4swiftonly(dispatch_queue_t dq)
+{
+	// Same test as dispatch_assert_queue, but answering instead of crashing:
+	// true if the calling context is running on dq, false otherwise.
+	unsigned long metatype = dx_metatype(dq);
+	if (unlikely(metatype != _DISPATCH_LANE_TYPE &&
+			metatype != _DISPATCH_WORKLOOP_TYPE)) {
+		DISPATCH_CLIENT_CRASH(metatype, "invalid queue passed to "
+				"dispatch_verify_current_queue_4swiftonly()");
+	}
+
+	uint64_t dq_state = os_atomic_load2o(dq, dq_state, relaxed);
+	if (likely(_dq_state_drain_locked_by_self(dq_state))) {
+		return true;
+	}
+	if (likely(_dispatch_thread_frame_find_queue(dq))) {
+		return true;
+	}
+	return false;
+}
