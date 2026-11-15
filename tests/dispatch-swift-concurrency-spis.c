@@ -2,6 +2,8 @@
 #include <assert.h>
 #include <dispatch/dispatch.h>
 #include <dlfcn.h>
+#include <errno.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -92,10 +94,18 @@ int main(void)
     struct override_info after = dispatch_thread_get_current_override_qos_floor();
     assert(after.can_override == 0 && after.qos_floor == 0);
     uint32_t lock = 0;
-    assert(dispatch_lock_override_start_with_debounce(&lock, 0, 0x19) == 0);
+    /* Lock owner is not the expected thread: ESRCH, lock untouched. */
+    assert(dispatch_lock_override_start_with_debounce(&lock, 0x103, 0x19) == ESRCH);
+    assert(errno == ESRCH);
     assert(lock == 0);
+    /* Owner matches a thread that cannot be overridden (the main thread, and
+     * every thread in this build): EPERM. */
+    uint32_t me = pthread_mach_thread_np(pthread_self());
+    lock = me & 0xfffffffcu;
+    assert(dispatch_lock_override_start_with_debounce(&lock, me, 0x19) == EPERM);
+    assert(errno == EPERM);
     assert(dispatch_lock_override_end(0x19) == 0);
-    puts("CHECK override calls return 0 and leave the thread unchanged");
+    puts("CHECK override calls report no override and leave the thread unchanged");
 
     q1 = dispatch_queue_create("spi.q1", NULL);
     q2 = dispatch_queue_create("spi.q2", NULL);

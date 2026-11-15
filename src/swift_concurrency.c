@@ -39,8 +39,10 @@
  * thread can be overridden and the four override SPIs below report exactly
  * what the Swift runtime assumes on systems that lack them (its
  * DispatchShims.h fallback): the thread cannot be overridden, nothing was
- * applied, status 0. Apple's bodies, which differ only by calling the
- * workqueue override helpers, are kept in the HAVE_PTHREAD_WORKQUEUE_QOS
+ * applied, status 0 (except the lock override start, which reports why it did not
+ * override). Apple's bodies, which differ only by calling the
+ * workqueue override helpers (and, for the lock override start, return a
+ * status instead of 0 when nothing can be overridden), are kept in the HAVE_PTHREAD_WORKQUEUE_QOS
  * branches.
  */
 
@@ -81,8 +83,21 @@ dispatch_lock_override_start_with_debounce(dispatch_lock_t *lock_addr,
 	return _dispatch_wqthread_override_start_check_owner(expected_thread,
 			_dispatch_qos_from_qos_class(override_to_apply), lock_addr);
 #else
-	(void)lock_addr; (void)expected_thread; (void)override_to_apply;
-	return 0;
+	// QUIRK: without workqueue QoS no thread can be overridden. Black-box
+	// observation on macOS 26.7.3 (tier 2, MAC-EVIDENCE.md): the call
+	// returns ESRCH (and sets errno) when the lock's owner is not the
+	// expected thread, and EPERM when the owner matches a thread that
+	// cannot be overridden (the main thread). Both are reproduced here
+	// because every thread is non-overridable in this build.
+	// Test: tests/dispatch-swift-concurrency-spis.c (lock owner checks)
+	(void)override_to_apply;
+	if (!_dispatch_lock_is_locked_by(os_atomic_load(lock_addr, relaxed),
+			expected_thread)) {
+		errno = ESRCH;
+		return ESRCH;
+	}
+	errno = EPERM;
+	return EPERM;
 #endif // HAVE_PTHREAD_WORKQUEUE_QOS
 }
 
